@@ -9,7 +9,9 @@ const PORT = process.env.PORT ?? 3001;
 // Dual-stack ('::') by default so the dashboard is reachable over both IPv4
 // and IPv6 (e.g. IPv6-enabled Docker networks — #180). Hosts with IPv6
 // disabled fall back to IPv4-only below; HOST overrides the default outright.
-const HOST = process.env.HOST ?? '::';
+// HOST_BIND takes precedence: when set, it pins the listen address regardless
+// of HOST (used on this WireGuard-only host to bind the API to 10.13.13.1).
+const HOST = process.env.HOST_BIND ?? process.env.HOST ?? '::';
 
 async function main() {
   initDb();
