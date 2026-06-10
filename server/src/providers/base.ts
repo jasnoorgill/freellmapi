@@ -6,6 +6,7 @@ import type {
   ChatToolChoice,
   Platform,
 } from '@freellmapi/shared/types.js';
+import { safeFetch } from '../lib/safe-fetch.js';
 import { proxyFetch } from '../lib/proxy.js';
 
 /** A provider HTTP error carrying the upstream status and, when the response
@@ -82,10 +83,27 @@ export abstract class BaseProvider {
     init: RequestInit,
     timeoutMs = 15000,
   ): Promise<Response> {
+    // Use the hardened safeFetch wrapper to catch late undici HTTP/2 stream
+    // errors (CDN edge reset, UND_ERR_SOCKET) that would otherwise escape as
+    // uncaughtException. safeFetch internally applies the timeout via
+    // AbortController, then delegates the actual network hop to proxyFetch so
+    // upstream's per-platform SOCKS5/HTTP proxy routing still applies.
+    //
+    // Static import — dynamic import inside a streaming call path can leave
+    // the body in a partially-read state. safe-fetch.ts has no dependency on
+    // providers, so static is safe.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      return await proxyFetch(url, { ...init, signal: controller.signal }, this.platform);
+      const res = await proxyFetch(
+        url,
+        { ...init, signal: controller.signal },
+        this.platform,
+      );
+      // Attach the late-stream-error guard to whatever proxyFetch returned.
+      // safeFetch is the same shape as fetch() but registers an `error`
+      // listener on the body so a late ClientHttp2Stream error is observed.
+      return safeFetch.attachBodyGuard(res, { url, platform: this.platform });
     } finally {
       clearTimeout(timeout);
     }
