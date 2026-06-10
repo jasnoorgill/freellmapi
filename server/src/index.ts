@@ -4,6 +4,16 @@ import { initDb, getSetting } from './db/index.js';
 import { startHealthChecker } from './services/health.js';
 import { applyProxyUrl, applyProxyEnabled, applyProxyBypass } from './lib/proxy.js';
 import { startCatalogSync } from './services/catalog-sync.js';
+import { installProcessSafetyNet } from './lib/process-safety-net.js';
+
+// Defense-in-depth: a late undici HTTP/2 stream error from a provider
+// can still escape as an `uncaughtException` or `unhandledRejection` if
+// it fires before safeFetch's body guard is installed. The handlers in
+// process-safety-net keep the process alive for transport-layer errors
+// (CDN edge resets, DNS failures, TLS errors) but let real programming
+// errors through so they surface and trigger `process.exit(1)`. See
+// server/src/lib/safe-fetch.ts for the primary fix.
+installProcessSafetyNet();
 
 const PORT = process.env.PORT ?? 3001;
 // Dual-stack ('::') by default so the dashboard is reachable over both IPv4
