@@ -9,7 +9,6 @@
 // cross-provider redundancy for free.
 import { getDb, getSetting } from '../db/index.js';
 import { decrypt } from '../lib/crypto.js';
-import { proxyFetch } from '../lib/proxy.js';
 
 export interface EmbeddingModelRow {
   id: number;
@@ -92,7 +91,7 @@ async function openAiStyleEmbed(
   inputs: string[],
   extra: Record<string, unknown> = {},
 ): Promise<ProviderCallResult> {
-  const r = await proxyFetch(url, {
+  const r = await fetch(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
     body: JSON.stringify({ model: modelId, input: inputs, ...extra }),
@@ -112,18 +111,23 @@ async function openAiStyleEmbed(
   };
 }
 
-async function callProvider(row: EmbeddingModelRow, key: string, inputs: string[]): Promise<ProviderCallResult> {
+async function callProvider(row: EmbeddingModelRow, key: string, inputs: string[], dimensions?: number): Promise<ProviderCallResult> {
   switch (row.platform) {
     case 'google':
-      return openAiStyleEmbed('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', key, row.model_id, inputs, {});
+      return openAiStyleEmbed('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', key, row.model_id, inputs,
+        dimensions ? { dimensions } : {});
     case 'nvidia':
       // NeMo Retriever NIMs require input_type; 'query' is the symmetric-safe
       // choice for a gateway that can't know whether this is index or query time.
-      return openAiStyleEmbed('https://integrate.api.nvidia.com/v1/embeddings', key, row.model_id, inputs, { input_type: 'query' });
+      // MRL models (e.g. llama-nemotron-embed-1b-v2) support dimensions truncation.
+      return openAiStyleEmbed('https://integrate.api.nvidia.com/v1/embeddings', key, row.model_id, inputs,
+        dimensions ? { input_type: 'query', dimensions } : { input_type: 'query' });
     case 'openrouter':
-      return openAiStyleEmbed('https://openrouter.ai/api/v1/embeddings', key, row.model_id, inputs, {});
+      return openAiStyleEmbed('https://openrouter.ai/api/v1/embeddings', key, row.model_id, inputs,
+        dimensions ? { dimensions } : {});
     case 'github':
-      return openAiStyleEmbed('https://models.github.ai/inference/embeddings', key, row.model_id, inputs, {});
+      return openAiStyleEmbed('https://models.github.ai/inference/embeddings', key, row.model_id, inputs,
+        dimensions ? { dimensions } : {});
     case 'cloudflare': {
       // Key is stored as "account_id:token".
       const sep = key.indexOf(':');
@@ -132,12 +136,12 @@ async function callProvider(row: EmbeddingModelRow, key: string, inputs: string[
       const token = key.slice(sep + 1);
       return openAiStyleEmbed(
         `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/embeddings`,
-        token, row.model_id, inputs, {},
+        token, row.model_id, inputs,
       );
     }
     case 'huggingface': {
       // HF serves embeddings as the feature-extraction task, not /v1/embeddings.
-      const r = await proxyFetch(
+      const r = await fetch(
         `https://router.huggingface.co/hf-inference/models/${row.model_id}/pipeline/feature-extraction`,
         {
           method: 'POST',
@@ -152,7 +156,7 @@ async function callProvider(row: EmbeddingModelRow, key: string, inputs: string[
       return { vectors, inputTokens: null };
     }
     case 'cohere': {
-      const r = await proxyFetch('https://api.cohere.com/v2/embed', {
+      const r = await fetch('https://api.cohere.com/v2/embed', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         body: JSON.stringify({
@@ -191,7 +195,7 @@ function logEmbeddingRequest(
 
 /** Embed `inputs` via the family's provider chain, failing over within the
  * family on any provider error. Throws EmbeddingsError when the chain is dry. */
-export async function runEmbeddings(model: string | undefined, inputs: string[]): Promise<EmbeddingsResult> {
+export async function runEmbeddings(model: string | undefined, inputs: string[], dimensions?: number): Promise<EmbeddingsResult> {
   const family = resolveFamily(model);
   if (!family) {
     throw new EmbeddingsError(
@@ -212,7 +216,7 @@ export async function runEmbeddings(model: string | undefined, inputs: string[])
     if (!key) continue; // no usable key for this provider — try the next one
     const started = Date.now();
     try {
-      const out = await callProvider(row, key, inputs);
+      const out = await callProvider(row, key, inputs, dimensions);
       if (out.vectors.length !== inputs.length || out.vectors.some(v => !Array.isArray(v) || v.length === 0)) {
         throw new EmbeddingsError('upstream returned malformed embeddings', 502);
       }

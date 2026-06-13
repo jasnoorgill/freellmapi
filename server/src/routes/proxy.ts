@@ -382,6 +382,7 @@ export function streamChunkText(chunk: any): string {
 const EmbeddingsBody = z.object({
   model: z.string().optional(),
   input: z.union([z.string(), z.array(z.string())]),
+  dimensions: z.number().optional(),
 });
 
 proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
@@ -398,7 +399,7 @@ proxyRouter.post('/embeddings', async (req: Request, res: Response) => {
   }
   const inputs = Array.isArray(parsed.data.input) ? parsed.data.input : [parsed.data.input];
   try {
-    const result = await runEmbeddings(parsed.data.model, inputs);
+    const result = await runEmbeddings(parsed.data.model, inputs, parsed.data.dimensions);
     res.json({
       object: 'list',
       data: result.vectors.map((values, i) => ({ object: 'embedding', index: i, embedding: values })),
