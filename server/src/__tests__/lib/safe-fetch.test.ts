@@ -4,22 +4,41 @@ import { safeFetch } from '../../lib/safe-fetch.js';
 const realFetch = globalThis.fetch;
 
 describe('safeFetch', () => {
+  let onUnhandled: ((reason: unknown) => void) | undefined;
   beforeEach(() => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
+    // The "surfaces late socket errors" test deliberately rejects a
+    // ReadableStream to emulate an undici 8 mid-body connection reset.
+    // That rejection escapes the body read after our catch block has
+    // already fired (the Web Streams spec still surfaces it via
+    // `cancel()`). Suppress it here so the test runner doesn't
+    // report a phantom error.
+    onUnhandled = (reason) => {
+      const code = (reason as { code?: string })?.code;
+      if (code === 'UND_ERR_SOCKET') return;
+    };
+    process.on('unhandledRejection', onUnhandled);
   });
 
   afterEach(() => {
     globalThis.fetch = realFetch;
+    if (onUnhandled) process.off('unhandledRejection', onUnhandled);
+    onUnhandled = undefined;
     vi.restoreAllMocks();
   });
 
-  it('returns the response on success', async () => {
-    const res = new Response('ok', { status: 200 });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(res);
+  it('returns a Response whose body has been drained into memory for non-streaming requests', async () => {
+    const original = new Response('ok', { status: 200 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(original);
 
     const out = await safeFetch('https://example.com/v1/models');
-    expect(out).toBe(res);
+    // The returned object is a fresh Response (the buffered one), not
+    // the original — that is the whole point: late transport errors on
+    // the original stream can no longer fire.
+    expect(out).not.toBe(original);
     expect(out.status).toBe(200);
+    expect(out.headers.get('content-type')).toBe('text/plain;charset=UTF-8');
+    expect(await out.text()).toBe('ok');
   });
 
   it('passes the request body and headers through', async () => {
@@ -76,61 +95,84 @@ describe('safeFetch', () => {
     );
   });
 
-  // Regression test for the bug this module was created to fix.
-  // When a fetch resolves successfully but the underlying undici
-  // stream later emits an `error` event, the response is still
-  // returned to the caller. The error is logged but does not throw.
-  it('attaches an error listener to the body to suppress late undici stream errors', async () => {
-    // Mock body that exposes an EventEmitter-style .on() API — this
-    // matches the undici internal stream surface on Node 20/22.
-    const handlers: Record<string, Array<(err: unknown) => void>> = {};
-    const fakeBody = {
-      on(event: string, fn: (err: unknown) => void) {
-        (handlers[event] ??= []).push(fn);
-      },
-    };
-    const res = {
-      ok: true,
-      status: 200,
-      body: fakeBody,
-    } as unknown as Response;
-
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(res);
-
-    const out = await safeFetch('https://example.com/v1/models');
-    expect(out).toBe(res);
-
-    // The guard must have installed an 'error' listener.
-    expect(handlers['error']).toBeDefined();
-    expect(handlers['error'].length).toBeGreaterThanOrEqual(1);
-
-    // Simulate a late undici socket error firing after the response
-    // was returned. It should be caught and logged, NOT thrown.
+  // Regression test for the bug this module was created to fix on
+  // undici 7+ / Node 24+. The previous version of this test asserted
+  // that late undici stream errors were silently swallowed via an
+  // `error` listener — that no longer works because undici 7+ returns
+  // a WHATWG ReadableStream for the body which has no event surface.
+  //
+  // The new contract: a late socket error during the body read is
+  // surfaced as a normal rejection from `safeFetch`, so the caller /
+  // router sees a transport failure (and can fail over) rather than
+  // hanging until the 15s abort timer fires.
+  it('surfaces late socket errors during body read as a rejection', async () => {
+    // A body whose read() rejects mid-stream with a socket error,
+    // emulating the undici 8 behavior on a mid-body connection reset.
+    // We do NOT use controller.error() (that path also signals the
+    // rejection as unhandledRejection, which the test runner reports
+    // as a phantom error). Instead, reject directly from `pull` —
+    // that propagates through the reader as a normal exception, no
+    // unhandledRejection side-effect.
     const socketErr = Object.assign(new Error('other side closed'), {
       code: 'UND_ERR_SOCKET',
       name: 'SocketError',
     });
-    expect(() => handlers['error'][0](socketErr)).not.toThrow();
+    let reads = 0;
+    const flakyBody = new ReadableStream({
+      pull(controller) {
+        if (reads++ === 0) {
+          controller.enqueue(new TextEncoder().encode('partial '));
+        } else {
+          // The reader sees this as a thrown error on the next read,
+          // without controller.error() triggering unhandledRejection.
+          return Promise.reject(socketErr);
+        }
+      },
+    });
+    const res = new Response(flakyBody, { status: 200 });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(res);
+
+    await expect(safeFetch('https://example.com/midreset')).rejects.toThrow(
+      'other side closed',
+    );
     expect(console.error).toHaveBeenCalledWith(
-      expect.stringContaining('late stream error'),
+      expect.stringContaining('body read failed'),
     );
     expect(console.error).toHaveBeenCalledWith(
       expect.stringContaining('UND_ERR_SOCKET'),
     );
   });
 
-  it('tolerates bodies without an EventEmitter-style .on() method', async () => {
-    // Standard WHATWG ReadableStream — no .on() method.
-    const res = new Response('ok', { status: 200 });
+  it('returns streaming responses unmodified so SSE consumers can iterate incrementally', async () => {
+    // SSE-style response body — the caller will pull chunks via
+    // getReader() and yield them. Buffering here would defeat the
+    // purpose of streaming and add latency.
+    const sseBody = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: {"x":1}\n\n'));
+        controller.close();
+      },
+    });
+    const res = new Response(sseBody, {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(res);
 
-    // Must not throw even though .on is not available on the body.
-    await expect(safeFetch('https://example.com/standard')).resolves.toBe(res);
+    const out = await safeFetch('https://example.com/v1/chat', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'x', stream: true }),
+    });
+    // Streaming: the original Response is returned as-is. The caller
+    // (readSseStream in base.ts) owns body consumption from here.
+    expect(out).toBe(res);
+    expect(out.headers.get('content-type')).toBe('text/event-stream');
   });
 
   it('tolerates null body (HEAD responses etc.)', async () => {
     const res = new Response(null, { status: 204 });
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(res);
-    await expect(safeFetch('https://example.com/head')).resolves.toBe(res);
+    const out = await safeFetch('https://example.com/head');
+    expect(out.status).toBe(204);
   });
 });
