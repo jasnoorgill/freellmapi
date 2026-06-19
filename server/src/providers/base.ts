@@ -6,7 +6,7 @@ import type {
   ChatToolChoice,
   Platform,
 } from '@freellmapi/shared/types.js';
-import { safeFetch } from '../lib/safe-fetch.js';
+import { safeFetch, attachBodyGuard } from '../lib/safe-fetch.js';
 import { proxyFetch } from '../lib/proxy.js';
 
 /** A provider HTTP error carrying the upstream status and, when the response
@@ -103,7 +103,7 @@ export abstract class BaseProvider {
       // Attach the late-stream-error guard to whatever proxyFetch returned.
       // safeFetch is the same shape as fetch() but registers an `error`
       // listener on the body so a late ClientHttp2Stream error is observed.
-      return safeFetch.attachBodyGuard(res, { url, platform: this.platform });
+      return attachBodyGuard(res, { url, platform: this.platform });
     } finally {
       clearTimeout(timeout);
     }
