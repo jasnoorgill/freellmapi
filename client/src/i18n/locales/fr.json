@@ -388,7 +388,11 @@
     "recentCalls": "Appels récents",
     "clientIp": "IP du client",
     "clientAgent": "Application cliente",
-    "requestedModelHint": "{model} demandé, servi par repli"
+    "requestedModelHint": "{model} demandé, servi par repli",
+    "searchAriaLabel": "Filtrer les tableaux d’analyses",
+    "noMatches": "Aucune ligne ne correspond au filtre.",
+    "matchedCount": "{shown} sur {total} correspondent",
+    "filterActiveHint": "Filtrage par « {query} »"
   },
   "playground": {
     "title": "Bac à sable",

@@ -1,4 +1,5 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { Search, X } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -143,6 +144,33 @@ function Stat({ label, value, hint, className }: { label: string; value: string 
   return hint ? <HoverTooltip text={hint} side="bottom" className="block">{card}</HoverTooltip> : card
 }
 
+// Persistence key for the analytics-page filter box. Same shape as the other
+// freellmapi.* dashboard settings (#462). Sticky across reloads so a power user
+// who's narrowed the view down to a single model doesn't have to retype every
+// visit. Invalid / missing values fall back to empty string; SSR-safe.
+const SEARCH_STORAGE_KEY = 'freellmapi.analytics.search'
+function loadStoredSearch(): string {
+  if (typeof window === 'undefined') return ''
+  try {
+    return window.localStorage.getItem(SEARCH_STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+// One filter matches if the query (trimmed, lower-cased) appears anywhere in the
+// joined, lower-cased haystack. Empty query short-circuits to "match all" so
+// the underlying array stays untouched. Case-insensitive substring (not fuzzy,
+// not regex) — same shape FallbackPage uses (#343), so power users get one
+// mental model across the dashboard.
+type MatchesFn<T> = (row: T, q: string) => boolean
+function makeMatches<T>(getHaystack: (row: T) => string): MatchesFn<T> {
+  return (row, q) => {
+    if (!q) return true
+    return getHaystack(row).toLowerCase().includes(q)
+  }
+}
+
 function Panel({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div className="rounded-3xl border bg-card">
@@ -178,6 +206,24 @@ export default function AnalyticsPage() {
   // Capture "now" once at mount so the savings extrapolation below stays a pure
   // render (calling Date.now() during render is impure and non-deterministic).
   const [now] = useState(() => Date.now())
+  // Page-wide filter. Filtered client-side over already-fetched rows so
+  // keystrokes don't re-hit the API (the useQuery keys stay range-only).
+  // Lazy init reads localStorage; persistence mirrors loadStoredRange in
+  // shape. The query is trimmed + lowered once at the top of the filter
+  // pipeline — passing it through unchanged means each `matches` impl stays
+  // pure, but the trim+lower happens in every render where the user typed.
+  // Cheap (8 memoized filters, total dataset < few hundred rows).
+  const [search, setSearch] = useState<string>(loadStoredSearch)
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      if (search) window.localStorage.setItem(SEARCH_STORAGE_KEY, search)
+      else window.localStorage.removeItem(SEARCH_STORAGE_KEY)
+    } catch {
+      /* ignore — storage quota / private mode */
+    }
+  }, [search])
+  const trimmedQuery = search.trim().toLowerCase()
 
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ['analytics', 'summary', range],
@@ -218,6 +264,63 @@ export default function AnalyticsPage() {
     queryKey: ['analytics', 'requests', range],
     queryFn: () => apiFetch<RecentCallsResponse>(`/api/analytics/requests?range=${range}&limit=100`),
   })
+
+  // ----- Page-wide filter ----------------------------------------------------
+  // One matches() builder per table, joined so the haystack is computed once
+  // per row in the filter pass (instead of three times via three separate
+  // predicates). For rows whose every field is a string primitive this is just
+  // template-literal concatenation. The four tables each carry slightly
+  // different searchable fields, so the haystack text is bespoke per row
+  // type. Charts are deliberately NOT filtered — they aggregate over the
+  // selected window and filtering them would misrepresent totals; the
+  // summary stat cards and time-series charts already stay unfiltered.
+  const matchesByModel = useMemo(
+    () => makeMatches<ByModelRow>((r) => `${r.displayName} ${r.platform} ${r.modelId}`),
+    []
+  )
+  const matchesByKey = useMemo(
+    () => makeMatches<ByKeyRow>((r) => `${r.label ?? ''} ${r.platform ?? ''} #${r.keyId}`),
+    []
+  )
+  const matchesRecentCall = useMemo(
+    () => makeMatches<RecentCallRow>((r) =>
+      `${r.clientIp ?? ''} ${r.clientUserAgent ?? ''} ${r.modelId} ${r.platform} ` +
+      `${r.requestedModel ?? ''} ${r.status} ${r.error ?? ''} ${r.requestType}`
+    ),
+    []
+  )
+  const matchesRecentError = useMemo(
+    () => makeMatches<RecentErrorRow>((r) => `${r.platform} ${r.modelId} ${r.error}`),
+    []
+  )
+  // Filtered versions of every list-driven surface. Each uses .filter + the
+  // `matches` helper so an empty query returns the array unmodified (no copy
+  // when there is no filter — saves an allocation per render in the common
+  // case). useMemo deps include trimmedQuery so a keystroke recomputes only
+  // what's affected; the dependencies on the source arrays keep the filter
+  // in sync with re-fetches when range changes.
+  const visibleByModel = useMemo(
+    () => trimmedQuery ? byModel.filter((r) => matchesByModel(r, trimmedQuery)) : byModel,
+    [byModel, matchesByModel, trimmedQuery]
+  )
+  const visibleByKey = useMemo(
+    () => trimmedQuery ? byKey.filter((r) => matchesByKey(r, trimmedQuery)) : byKey,
+    [byKey, matchesByKey, trimmedQuery]
+  )
+  const visibleRecentCalls = useMemo(() => {
+    const rows = recentCalls?.rows
+    if (!rows) return rows
+    return trimmedQuery ? rows.filter((r) => matchesRecentCall(r, trimmedQuery)) : rows
+  }, [recentCalls?.rows, matchesRecentCall, trimmedQuery])
+  const visibleErrors = useMemo(
+    () => trimmedQuery ? errors.filter((r) => matchesRecentError(r, trimmedQuery)) : errors,
+    [errors, matchesRecentError, trimmedQuery]
+  )
+
+  // Whether any filter is active at all. Renders the `noMatches` empty state
+  // below instead of `noData` so the user understands "filter excluded
+  // everything" vs "no traffic yet" — each panel checks `x.length === 0` plus
+  // `trimmedQuery !== ''` to decide which message to show.
 
   // Savings card shows ONE stable monthly figure regardless of the selected
   // range: the last-30-days data projected to a full month from its actual
@@ -284,15 +387,41 @@ export default function AnalyticsPage() {
         title={t('analytics.title')}
         description={t('analytics.description')}
         actions={
-          <SegmentedControl
-            value={range}
-            onValueChange={setRange}
-            options={(['24h', '7d', '30d', '90d'] as TimeRange[]).map(r => ({
-              value: r,
-              label: t(r === '24h' ? 'analytics.range24h' : r === '7d' ? 'analytics.range7d' : r === '30d' ? 'analytics.range30d' : 'analytics.range90d'),
-            }))}
-            ariaLabel={t('analytics.title')}
-          />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {/* Search box mirrors the FallbackPage toolbar (#343): Search icon
+                on the left, X clear on the right, same rounded-xl border. Sized
+                so the box doesn't dominate the page header — `w-56` is enough
+                for ~25 chars of model/IP query, which covers every realistic
+                filter. The Segment sits to the right on lg+ screens. */}
+            <div className="relative w-full sm:w-56">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder={t('models.searchPlaceholder')}
+                aria-label={t('analytics.searchAriaLabel')}
+                className="w-full rounded-xl border bg-card py-1.5 pl-8 pr-7 text-sm outline-none transition-colors focus:border-foreground/30"
+              />
+              {search && (
+                <button
+                  onClick={() => setSearch('')}
+                  aria-label={t('models.clearSearch')}
+                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="size-4" />
+                </button>
+              )}
+            </div>
+            <SegmentedControl
+              value={range}
+              onValueChange={setRange}
+              options={(['24h', '7d', '30d', '90d'] as TimeRange[]).map(r => ({
+                value: r,
+                label: t(r === '24h' ? 'analytics.range24h' : r === '7d' ? 'analytics.range7d' : r === '30d' ? 'analytics.range30d' : 'analytics.range90d'),
+              }))}
+              ariaLabel={t('analytics.title')}
+            />
+          </div>
         }
       />
 
@@ -451,6 +580,8 @@ export default function AnalyticsPage() {
           <Panel title={t('analytics.recentErrors')}>
             {errors.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
+            ) : visibleErrors.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
             ) : (
               <div className="max-h-[240px] overflow-y-auto -mx-4">
                 <Table>
@@ -462,7 +593,7 @@ export default function AnalyticsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {errors.slice(0, 20).map((e) => (
+                    {visibleErrors.slice(0, 20).map((e) => (
                       <TableRow key={e.id}>
                         <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
                         <TableCell className="text-xs max-w-[200px] truncate">{e.error}</TableCell>
@@ -484,6 +615,8 @@ export default function AnalyticsPage() {
             <Panel title={t('analytics.recentCalls')}>
               {!recentCalls?.rows?.length ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
+              ) : !visibleRecentCalls?.length ? (
+                <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
               ) : (
                 <div className="max-h-[420px] overflow-y-auto -mx-4">
                   <Table>
@@ -501,7 +634,7 @@ export default function AnalyticsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {recentCalls.rows.map((r) => (
+                      {visibleRecentCalls.map((r) => (
                         <TableRow key={r.id}>
                           <TableCell className="pl-4 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
                             {formatSqliteUtcToLocalTime(r.createdAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
@@ -534,6 +667,8 @@ export default function AnalyticsPage() {
             <Panel title={t('analytics.perModelBreakdown')}>
               {byModel.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
+              ) : visibleByModel.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
               ) : (
                 <div className="max-h-[360px] overflow-y-auto -mx-4">
                   <Table>
@@ -551,7 +686,7 @@ export default function AnalyticsPage() {
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {byModel.map((m, i) => (
+                      {visibleByModel.map((m, i) => (
                         <TableRow key={i}>
                           <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
@@ -575,36 +710,40 @@ export default function AnalyticsPage() {
           {byKey.length > 0 && (
             <div className="lg:col-span-2">
               <Panel title={t('analytics.usageByKey')}>
-                <div className="max-h-[360px] overflow-y-auto -mx-4">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="pl-4">{t('analytics.keyColumn')}</TableHead>
-                        <TableHead>{t('common.provider')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.requests')}</TableHead>
-                        <TableHead className="text-right">{t('common.success')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.latency')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
-                        <TableHead className="text-right pr-4">{t('analytics.outTokens')}</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {byKey.map((k) => (
-                        <TableRow key={k.keyId}>
-                          <TableCell className="pl-4 text-sm font-medium">
-                            {k.label || t('analytics.keyLabelFallback', { id: k.keyId })}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{k.platform ?? '—'}</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.requests}</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.successRate}%</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.avgLatencyMs} ms</TableCell>
-                          <TableCell className="text-right tabular-nums">{formatTokens(k.totalInputTokens)}</TableCell>
-                          <TableCell className="text-right tabular-nums pr-4">{formatTokens(k.totalOutputTokens)}</TableCell>
+                {visibleByKey.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
+                ) : (
+                  <div className="max-h-[360px] overflow-y-auto -mx-4">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="pl-4">{t('analytics.keyColumn')}</TableHead>
+                          <TableHead>{t('common.provider')}</TableHead>
+                          <TableHead className="text-right">{t('analytics.requests')}</TableHead>
+                          <TableHead className="text-right">{t('common.success')}</TableHead>
+                          <TableHead className="text-right">{t('analytics.latency')}</TableHead>
+                          <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
+                          <TableHead className="text-right pr-4">{t('analytics.outTokens')}</TableHead>
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleByKey.map((k) => (
+                          <TableRow key={k.keyId}>
+                            <TableCell className="pl-4 text-sm font-medium">
+                              {k.label || t('analytics.keyLabelFallback', { id: k.keyId })}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">{k.platform ?? '—'}</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.requests}</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.successRate}%</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.avgLatencyMs} ms</TableCell>
+                            <TableCell className="text-right tabular-nums">{formatTokens(k.totalInputTokens)}</TableCell>
+                            <TableCell className="text-right tabular-nums pr-4">{formatTokens(k.totalOutputTokens)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
               </Panel>
             </div>
           )}

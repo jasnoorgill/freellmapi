@@ -388,7 +388,11 @@
     "recentCalls": "Chiamate recenti",
     "clientIp": "IP del client",
     "clientAgent": "App client",
-    "requestedModelHint": "Richiesto {model}, servito dal fallback"
+    "requestedModelHint": "Richiesto {model}, servito dal fallback",
+    "searchAriaLabel": "Filtra le tabelle delle analisi",
+    "noMatches": "Nessuna riga corrisponde al filtro.",
+    "matchedCount": "{shown} di {total} corrispondono",
+    "filterActiveHint": "Filtrando per \"{query}\""
   },
   "playground": {
     "title": "Playground",

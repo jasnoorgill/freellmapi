@@ -388,7 +388,11 @@
     "recentCalls": "Llamadas recientes",
     "clientIp": "IP del cliente",
     "clientAgent": "Aplicación cliente",
-    "requestedModelHint": "Se solicitó {model}, servido por respaldo"
+    "requestedModelHint": "Se solicitó {model}, servido por respaldo",
+    "searchAriaLabel": "Filtrar tablas de análisis",
+    "noMatches": "Ninguna fila coincide con el filtro.",
+    "matchedCount": "{shown} de {total} coinciden",
+    "filterActiveHint": "Filtrando por \"{query}\""
   },
   "playground": {
     "title": "Entorno de pruebas",

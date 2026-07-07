@@ -405,7 +405,11 @@
     "recentCalls": "Recent calls",
     "clientIp": "Client IP",
     "clientAgent": "Client app",
-    "requestedModelHint": "Requested {model}, served by fallback"
+    "requestedModelHint": "Requested {model}, served by fallback",
+    "searchAriaLabel": "Filter analytics tables",
+    "noMatches": "No rows match the filter.",
+    "matchedCount": "{shown} of {total} matching",
+    "filterActiveHint": "Filtering by \"{query}\""
   },
   "playground": {
     "title": "Playground",
