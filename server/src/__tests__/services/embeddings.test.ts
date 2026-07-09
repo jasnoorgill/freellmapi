@@ -234,6 +234,16 @@ describe('embeddings service', () => {
     });
 
     describe('dimensions parameter (MRL truncation)', () => {
+      // Typed fetch mock so .mock.calls is properly indexed without `as any`.
+      // The cast on assignment to globalThis.fetch is unavoidable because
+      // globalThis.fetch in lib.dom is typed loosely; this is the same
+      // pattern the existing tests in this file use.
+      function mockFetch(impl: typeof fetch): MockedFunction<typeof fetch> {
+        const m = vi.fn(impl) as MockedFunction<typeof fetch>;
+        globalThis.fetch = m as unknown as typeof fetch;
+        return m;
+      }
+
       it('forwards dimensions to NVIDIA NeMo NIM in the request body', async () => {
         addKey('nvidia');
         const fetchMock = mockFetch(async () => okEmbeddingResponse(1536));
