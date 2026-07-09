@@ -150,9 +150,6 @@ function loadStoredRange(): TimeRange {
 // distinction would confuse the indicator. 3-state cycle per column:
 // null → asc → desc → null. Switching to a new column resets to asc.
 type SortColumn = 'model' | 'provider' | 'requests' | 'success' | 'latency' | 'inTokens' | 'outTokens' | 'saved'
-// Per-model table uses the parameterless alias; new tables specialize
-// `SortState<C>` directly with their own column union.
-type SortState = SortState<SortColumn>
 
 const SORT_COLUMNS: readonly SortColumn[] = [
   'model', 'provider', 'requests', 'success', 'latency', 'inTokens', 'outTokens', 'saved',
@@ -405,13 +402,13 @@ export default function AnalyticsPage() {
   // Per-model table sort. Cycle: null → asc → desc → null. Switching column
   // starts at asc on the new column. Persisted so the next visit lands on
   // the user's preferred sort.
-  const [sort, setSort] = useState<SortState>(() => loadStoredSort<SortColumn>(SORT_STORAGE_KEY, SORT_COLUMNS))
+  const [sort, setSort] = useState<SortState<SortColumn>>(() => loadStoredSort<SortColumn>(SORT_STORAGE_KEY, SORT_COLUMNS))
   useEffect(() => {
     persistSort(SORT_STORAGE_KEY, sort)
   }, [sort])
 
   const onHeaderClick = (col: SortColumn) => {
-    setSort((current) => {
+    setSort((current: SortState<SortColumn>) => {
       if (!current || current.column !== col) return { column: col, direction: 'asc' }
       if (current.direction === 'asc') return { column: col, direction: 'desc' }
       return null // third click on the same column → restore API order
@@ -511,15 +508,6 @@ export default function AnalyticsPage() {
     () => trimmedQuery ? sortedByModel.filter((r) => matchesByModel(r, trimmedQuery)) : sortedByModel,
     [sortedByModel, matchesByModel, trimmedQuery]
   )
-  const visibleByKey = useMemo(
-    () => trimmedQuery ? sortedByKey.filter((r) => matchesByKey(r, trimmedQuery)) : sortedByKey,
-    [sortedByKey, matchesByKey, trimmedQuery]
-  )
-  const visibleRecentCalls = useMemo(() => {
-    const rows = sortedRecentCalls
-    if (!rows) return rows
-    return trimmedQuery ? rows.filter((r) => matchesRecentCall(r, trimmedQuery)) : rows
-  }, [sortedRecentCalls, matchesRecentCall, trimmedQuery])
   const visibleErrors = useMemo(
     () => trimmedQuery ? errors.filter((r) => matchesRecentError(r, trimmedQuery)) : errors,
     [errors, matchesRecentError, trimmedQuery]
@@ -570,7 +558,7 @@ export default function AnalyticsPage() {
     }
   }
   const onRecentCallsHeaderClick = (col: RecentCallCol) => {
-    setRecentCallsSort((current) => {
+    setRecentCallsSort((current: SortState<RecentCallCol>) => {
       if (!current || current.column !== col) return { column: col, direction: 'asc' }
       if (current.direction === 'asc') return { column: col, direction: 'desc' }
       return null // third click → restore API-returned order
@@ -601,7 +589,7 @@ export default function AnalyticsPage() {
     }
   }
   const onByKeyHeaderClick = (col: ByKeyCol) => {
-    setByKeySort((current) => {
+    setByKeySort((current: SortState<ByKeyCol>) => {
       if (!current || current.column !== col) return { column: col, direction: 'asc' }
       if (current.direction === 'asc') return { column: col, direction: 'desc' }
       return null
@@ -637,6 +625,18 @@ export default function AnalyticsPage() {
     })
     return copy
   }, [byKey, byKeySort])
+
+  // Filtered versions of byKey and recentCalls. Sorted first, then search-
+  // filtered, so the search box preserves the user's sort column.
+  const visibleByKey = useMemo(
+    () => trimmedQuery ? sortedByKey.filter((r) => matchesByKey(r, trimmedQuery)) : sortedByKey,
+    [sortedByKey, matchesByKey, trimmedQuery]
+  )
+  const visibleRecentCalls = useMemo(() => {
+    const rows = sortedRecentCalls
+    if (!rows) return rows
+    return trimmedQuery ? rows.filter((r) => matchesRecentCall(r, trimmedQuery)) : rows
+  }, [sortedRecentCalls, matchesRecentCall, trimmedQuery])
 
   const actualSavings = summary?.estimatedCostSavings ?? 0
   const baseSavings = summary30?.estimatedCostSavings ?? 0
