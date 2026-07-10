@@ -332,6 +332,12 @@
     "unchecked": "未检查"
   },
   "analytics": {
+    "searchScopeAll": "全部",
+    "searchScopeAriaLabel": "筛选范围",
+    "searchScopeCalls": "调用",
+    "searchScopeErrors": "错误",
+    "searchScopeKeys": "密钥",
+    "searchScopeModels": "模型",
     "title": "分析",
     "description": "请求量、延迟、令牌用量与失败情况。",
     "range24h": "24 小时",

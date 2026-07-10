@@ -11,7 +11,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { PageHeader } from '@/components/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip as HoverTooltip } from '@/components/tooltip'
-import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { cn, formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { useI18n } from '@/i18n'
 
 type TimeRange = '24h' | '7d' | '30d' | '90d'
@@ -305,20 +305,6 @@ function Stat({ label, value, hint, className }: { label: string; value: string 
   return hint ? <HoverTooltip text={hint} side="bottom" className="block">{card}</HoverTooltip> : card
 }
 
-// Persistence key for the analytics-page filter box. Same shape as the other
-// freellmapi.* dashboard settings (#462). Sticky across reloads so a power user
-// who's narrowed the view down to a single model doesn't have to retype every
-// visit. Invalid / missing values fall back to empty string; SSR-safe.
-const SEARCH_STORAGE_KEY = 'freellmapi.analytics.search'
-function loadStoredSearch(): string {
-  if (typeof window === 'undefined') return ''
-  try {
-    return window.localStorage.getItem(SEARCH_STORAGE_KEY) ?? ''
-  } catch {
-    return ''
-  }
-}
-
 // One filter matches if the query (trimmed, lower-cased) appears anywhere in the
 // joined, lower-cased haystack. Empty query short-circuits to "match all" so
 // the underlying array stays untouched. Case-insensitive substring (not fuzzy,
@@ -332,11 +318,39 @@ function makeMatches<T>(getHaystack: (row: T) => string): MatchesFn<T> {
   }
 }
 
-function Panel({ title, children }: { title: string; children: React.ReactNode }) {
+// Panel card. The same `highlighted` ring used on the toolbar (#fe1) wraps
+// the card when its data is being filtered by the search box — same
+// primary-tinted ring, same shadow, same transition duration so the input
+// row and the table pulse in sync. `countLabel` is the pre-rendered top-right
+// text (parent calls `t('analytics.matchedCount', …)` so this component stays
+// presentational and doesn't need the i18n hook in scope). Same
+// flex/justify-between keeps the title left + count right even when no
+// count is rendered, so the title doesn't shift when a filter is applied.
+function Panel({
+  title,
+  children,
+  highlighted = false,
+  countLabel,
+}: {
+  title: string
+  children: React.ReactNode
+  highlighted?: boolean
+  countLabel?: React.ReactNode
+}) {
   return (
-    <div className="rounded-3xl border bg-card">
-      <div className="px-4 py-3 border-b">
+    <div
+      className={cn(
+        "rounded-3xl border bg-card transition-shadow duration-200",
+        highlighted && "ring-2 ring-primary/50 shadow-lg shadow-primary/10"
+      )}
+    >
+      <div className="px-4 py-3 border-b flex items-center justify-between">
         <h3 className="text-sm font-medium">{title}</h3>
+        {highlighted && countLabel != null && (
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {countLabel}
+          </span>
+        )}
       </div>
       <div className="p-4">{children}</div>
     </div>
@@ -370,22 +384,28 @@ export default function AnalyticsPage() {
   const [now] = useState(() => Date.now())
   // Page-wide filter. Filtered client-side over already-fetched rows so
   // keystrokes don't re-hit the API (the useQuery keys stay range-only).
-  // Lazy init reads localStorage; persistence mirrors loadStoredRange in
-  // shape. The query is trimmed + lowered once at the top of the filter
-  // pipeline — passing it through unchanged means each `matches` impl stays
-  // pure, but the trim+lower happens in every render where the user typed.
-  // Cheap (8 memoized filters, total dataset < few hundred rows).
-  const [search, setSearch] = useState<string>(loadStoredSearch)
-  useEffect(() => {
-    if (typeof window === 'undefined') return
-    try {
-      if (search) window.localStorage.setItem(SEARCH_STORAGE_KEY, search)
-      else window.localStorage.removeItem(SEARCH_STORAGE_KEY)
-    } catch {
-      /* ignore — storage quota / private mode */
-    }
-  }, [search])
+  // NOT persisted: the search box resets to empty on every page mount, same
+  // shape as FallbackPage and ProviderList. The user is more often
+  // investigating a one-off pattern than narrowing repeatedly across visits,
+  // and persistence makes the page land in a half-filtered state from a
+  // deep link with no context.
+  //
+  // The `scope` chip selects which tables the search applies to. Default
+  // 'all' preserves the prior behavior; the other values narrow the
+  // filter to a single table so typing in the box doesn't shrink panels
+  // the user isn't looking at. Tables outside the active scope render
+  // unfiltered.
+  //
+  // The query is trimmed + lowered once at the top of the filter
+  // pipeline — passing it through unchanged means each `matches` impl
+  // stays pure, but the trim+lower happens in every render where the
+  // user typed. Cheap (4 memoized filters, total dataset < few hundred
+  // rows).
+  type SearchScope = 'all' | 'models' | 'calls' | 'errors' | 'keys'
+  const [search, setSearch] = useState<string>('')
+  const [scope, setScope] = useState<SearchScope>('all')
   const trimmedQuery = search.trim().toLowerCase()
+  const hasQuery = trimmedQuery.length > 0
 
   // Remember the last-selected range across page reloads / new sessions so
   // the user lands back on the window they were inspecting. Same
@@ -504,19 +524,38 @@ export default function AnalyticsPage() {
   // case). useMemo deps include trimmedQuery so a keystroke recomputes only
   // what's affected; the dependencies on the source arrays keep the filter
   // in sync with re-fetches when range changes.
+  // Per-table filtered arrays. The filter only applies when:
+  //   1. there's a non-empty query, AND
+  //   2. the active scope includes the table.
+  // A table outside the active scope renders unfiltered even with text in the
+  // box — that's the whole point of the scope chip. Empty query short-circuits
+  // to the source array (no allocation in the common no-filter case). The
+  // `highlight*` flags drive the panel ring + match-count display: a panel
+  // highlights only when it's in scope AND the filter produced ≥1 match.
+  // Zero matches in a panel = no highlight, no count, full table (the panel
+  // is a no-op for this query and renders as if there were no filter).
+  const inScope = (kind: 'models' | 'calls' | 'errors' | 'keys') =>
+    scope === 'all' || scope === kind
   const visibleByModel = useMemo(
-    () => trimmedQuery ? sortedByModel.filter((r) => matchesByModel(r, trimmedQuery)) : sortedByModel,
-    [sortedByModel, matchesByModel, trimmedQuery]
+    () => hasQuery && inScope('models')
+      ? sortedByModel.filter((r) => matchesByModel(r, trimmedQuery))
+      : sortedByModel,
+    [sortedByModel, matchesByModel, trimmedQuery, hasQuery, scope]
   )
   const visibleErrors = useMemo(
-    () => trimmedQuery ? errors.filter((r) => matchesRecentError(r, trimmedQuery)) : errors,
-    [errors, matchesRecentError, trimmedQuery]
+    () => hasQuery && inScope('errors')
+      ? errors.filter((r) => matchesRecentError(r, trimmedQuery))
+      : errors,
+    [errors, matchesRecentError, trimmedQuery, hasQuery, scope]
   )
-
-  // Whether any filter is active at all. Renders the `noMatches` empty state
-  // below instead of `noData` so the user understands "filter excluded
-  // everything" vs "no traffic yet" — each panel checks `x.length === 0` plus
-  // `trimmedQuery !== ''` to decide which message to show.
+  // Single source of truth for "is this panel's filter active right now?" —
+  // any of the four tables highlighting pulls the search-row container
+  // into the same highlighted state, so the input area and the filtered
+  // table read as one visual unit. The byKey + calls entries are declared
+  // further down (next to their sorted/visible derivations) because they
+  // depend on variables that aren't in scope yet.
+  const highlightByModel  = hasQuery && inScope('models')  && sortedByModel.length > 0 && visibleByModel.length > 0
+  const highlightErrors   = hasQuery && inScope('errors')  && errors.length > 0       && visibleErrors.length > 0
 
   // Savings card shows ONE stable monthly figure regardless of the selected
   // range: the last-30-days data projected to a full month from its actual
@@ -627,16 +666,31 @@ export default function AnalyticsPage() {
   }, [byKey, byKeySort])
 
   // Filtered versions of byKey and recentCalls. Sorted first, then search-
-  // filtered, so the search box preserves the user's sort column.
+  // filtered, so the search box preserves the user's sort column. Same scope
+  // gate as the other two: only filter when the active scope includes the
+  // table. recentCalls may be undefined while the query is in flight; the
+  // helper preserves that case so the panel renders the loading state.
   const visibleByKey = useMemo(
-    () => trimmedQuery ? sortedByKey.filter((r) => matchesByKey(r, trimmedQuery)) : sortedByKey,
-    [sortedByKey, matchesByKey, trimmedQuery]
+    () => hasQuery && inScope('keys')
+      ? sortedByKey.filter((r) => matchesByKey(r, trimmedQuery))
+      : sortedByKey,
+    [sortedByKey, matchesByKey, trimmedQuery, hasQuery, scope]
   )
   const visibleRecentCalls = useMemo(() => {
     const rows = sortedRecentCalls
     if (!rows) return rows
-    return trimmedQuery ? rows.filter((r) => matchesRecentCall(r, trimmedQuery)) : rows
-  }, [sortedRecentCalls, matchesRecentCall, trimmedQuery])
+    return hasQuery && inScope('calls')
+      ? rows.filter((r) => matchesRecentCall(r, trimmedQuery))
+      : rows
+  }, [sortedRecentCalls, matchesRecentCall, trimmedQuery, hasQuery, scope])
+
+  // The remaining highlight flags live here because `sortedByKey` and
+  // `sortedRecentCalls` are declared further down (next to their sort
+  // state). All four are now in scope; the toolbar pulls `anyPanelHighlighted`
+  // from this single derived value to drive the input-area ring.
+  const highlightByKey    = hasQuery && inScope('keys')    && sortedByKey.length > 0  && visibleByKey.length > 0
+  const highlightByCalls  = hasQuery && inScope('calls')   && (sortedRecentCalls?.length ?? 0) > 0 && (visibleRecentCalls?.length ?? 0) > 0
+  const anyPanelHighlighted = highlightByModel || highlightErrors || highlightByKey || highlightByCalls
 
   const actualSavings = summary?.estimatedCostSavings ?? 0
   const baseSavings = summary30?.estimatedCostSavings ?? 0
@@ -693,29 +747,73 @@ export default function AnalyticsPage() {
         description={t('analytics.description')}
         actions={
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            {/* Search box mirrors the FallbackPage toolbar (#343): Search icon
-                on the left, X clear on the right, same rounded-xl border. Sized
-                so the box doesn't dominate the page header — `w-56` is enough
-                for ~25 chars of model/IP query, which covers every realistic
-                filter. The Segment sits to the right on lg+ screens. */}
-            <div className="relative w-full sm:w-56">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
-              <input
-                value={search}
-                onChange={e => setSearch(e.target.value)}
-                placeholder={t('models.searchPlaceholder')}
-                aria-label={t('analytics.searchAriaLabel')}
-                className="w-full rounded-xl border bg-card py-1.5 pl-8 pr-7 text-sm outline-none transition-colors focus:border-foreground/30"
-              />
-              {search && (
-                <button
-                  onClick={() => setSearch('')}
-                  aria-label={t('models.clearSearch')}
-                  className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  <X className="size-4" />
-                </button>
+            {/* Search row: input + scope chips, all sharing one rounded border.
+                Mirrors the FallbackPage toolbar shape (#343). When any panel
+                below is actively filtering (highlighted), the same
+                primary-tinted ring animates around this whole container so
+                the input area reads as part of the same visual unit. Same
+                shadow + transition as the table panels, so the eye groups
+                them as one. `w-56` covers ~25 chars of model/IP query. */}
+            <div
+              className={cn(
+                "flex items-center gap-2 rounded-xl border bg-card px-2.5 py-1 transition-shadow duration-200",
+                anyPanelHighlighted && "ring-2 ring-primary/50 shadow-lg shadow-primary/10"
               )}
+            >
+              <div className="relative flex-1 min-w-0 sm:w-56">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder={t('models.searchPlaceholder')}
+                  aria-label={t('analytics.searchAriaLabel')}
+                  className="w-full bg-transparent py-1 pl-8 pr-7 text-sm outline-none"
+                />
+                {search && (
+                  <button
+                    onClick={() => setSearch('')}
+                    aria-label={t('models.clearSearch')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-4" />
+                  </button>
+                )}
+              </div>
+              {/* Scope chip strip. `role="group"` + `aria-label` so screen
+                  readers announce "Filter scope" and treat the chips as a
+                  single radiogroup. Each chip is a real <button> (not a
+                  div) so Tab + Space/Enter works. The selected chip uses
+                  the same primary tint as the panel ring, tying the
+                  "active filter" cue across the toolbar and the table. */}
+              <div
+                role="group"
+                aria-label={t('analytics.searchScopeAriaLabel')}
+                className="flex items-center gap-1 pl-2 border-l"
+              >
+                {(['all', 'models', 'calls', 'errors', 'keys'] as const).map(s => {
+                  const isActive = scope === s
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setScope(s)}
+                      aria-pressed={isActive}
+                      className={cn(
+                        "rounded-full px-2.5 py-0.5 text-xs font-medium border transition-colors",
+                        isActive
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-muted-foreground hover:text-foreground hover:bg-muted"
+                      )}
+                    >
+                      {t(s === 'all' ? 'analytics.searchScopeAll'
+                           : s === 'models' ? 'analytics.searchScopeModels'
+                           : s === 'calls' ? 'analytics.searchScopeCalls'
+                           : s === 'errors' ? 'analytics.searchScopeErrors'
+                           : 'analytics.searchScopeKeys')}
+                    </button>
+                  )
+                })}
+              </div>
             </div>
             <SegmentedControl
               value={range}
@@ -882,7 +980,11 @@ export default function AnalyticsPage() {
             )}
           </Panel>
 
-          <Panel title={t('analytics.recentErrors')}>
+          <Panel
+            title={t('analytics.recentErrors')}
+            highlighted={highlightErrors}
+            countLabel={highlightErrors ? t('analytics.matchedCount', { shown: visibleErrors.length, total: errors.length }) : undefined}
+          >
             {errors.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
             ) : visibleErrors.length === 0 ? (
@@ -919,7 +1021,11 @@ export default function AnalyticsPage() {
               user agent. All local clients share the unified key, so this is
               the only view that answers "who is hitting the router". */}
           <div className="lg:col-span-2">
-            <Panel title={t('analytics.recentCalls')}>
+            <Panel
+              title={t('analytics.recentCalls')}
+              highlighted={highlightByCalls}
+              countLabel={highlightByCalls ? t('analytics.matchedCount', { shown: visibleRecentCalls?.length ?? 0, total: recentCalls?.rows?.length ?? 0 }) : undefined}
+            >
               {!recentCalls?.rows?.length ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
               ) : !visibleRecentCalls?.length ? (
@@ -971,7 +1077,11 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="lg:col-span-2">
-            <Panel title={t('analytics.perModelBreakdown')}>
+            <Panel
+              title={t('analytics.perModelBreakdown')}
+              highlighted={highlightByModel}
+              countLabel={highlightByModel ? t('analytics.matchedCount', { shown: visibleByModel.length, total: byModel.length }) : undefined}
+            >
               {byModel.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
               ) : visibleByModel.length === 0 ? (
@@ -1016,7 +1126,11 @@ export default function AnalyticsPage() {
           {/* Usage by key: only rendered when the endpoint returns rows. */}
           {byKey.length > 0 && (
             <div className="lg:col-span-2">
-              <Panel title={t('analytics.usageByKey')}>
+              <Panel
+                title={t('analytics.usageByKey')}
+                highlighted={highlightByKey}
+                countLabel={highlightByKey ? t('analytics.matchedCount', { shown: visibleByKey.length, total: byKey.length }) : undefined}
+              >
                 {visibleByKey.length === 0 ? (
                   <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
                 ) : (

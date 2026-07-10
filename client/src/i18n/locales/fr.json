@@ -332,6 +332,12 @@
     "unchecked": "non vérifié"
   },
   "analytics": {
+    "searchScopeAll": "Tous",
+    "searchScopeAriaLabel": "Portée du filtre",
+    "searchScopeCalls": "Appels",
+    "searchScopeErrors": "Erreurs",
+    "searchScopeKeys": "Clés",
+    "searchScopeModels": "Modèles",
     "title": "Analytique",
     "description": "Volume de requêtes, latence, consommation de tokens et échecs.",
     "range24h": "24 h",
