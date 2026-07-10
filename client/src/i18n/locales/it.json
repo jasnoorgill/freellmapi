@@ -332,6 +332,12 @@
     "unchecked": "non controllato"
   },
   "analytics": {
+    "searchScopeAll": "Tutto",
+    "searchScopeAriaLabel": "Ambito del filtro",
+    "searchScopeCalls": "Chiamate",
+    "searchScopeErrors": "Errori",
+    "searchScopeKeys": "Chiavi",
+    "searchScopeModels": "Modelli",
     "title": "Analisi",
     "description": "Volume richieste, latenza, utilizzo token ed errori.",
     "range24h": "24h",

@@ -332,6 +332,12 @@
     "unchecked": "sin comprobar"
   },
   "analytics": {
+    "searchScopeAll": "Todos",
+    "searchScopeAriaLabel": "Alcance del filtro",
+    "searchScopeCalls": "Llamadas",
+    "searchScopeErrors": "Errores",
+    "searchScopeKeys": "Claves",
+    "searchScopeModels": "Modelos",
     "title": "Analíticas",
     "description": "Volumen de solicitudes, latencia, consumo de tokens y fallos.",
     "range24h": "24 h",
