@@ -370,6 +370,12 @@
     "unchecked": "sin comprobar"
   },
   "analytics": {
+    "searchScopeAll": "Todos",
+    "searchScopeAriaLabel": "Alcance del filtro",
+    "searchScopeCalls": "Llamadas",
+    "searchScopeErrors": "Errores",
+    "searchScopeKeys": "Claves",
+    "searchScopeModels": "Modelos",
     "title": "Analíticas",
     "description": "Volumen de solicitudes, latencia, consumo de tokens y fallos.",
     "range24h": "24 h",
@@ -439,7 +445,11 @@
     "keyOrdinal": "clave #{n}",
     "attemptTimingHint": "Desfase desde el inicio de la solicitud · duración del intento",
     "requestedModel": "Modelo solicitado",
-    "ttft": "TTFT"
+    "ttft": "TTFT",
+    "searchAriaLabel": "Filtrar tablas de análisis",
+    "noMatches": "Ninguna fila coincide con el filtro.",
+    "matchedCount": "{shown} de {total} coinciden",
+    "filterActiveHint": "Filtrando por \"{query}\""
   },
   "playground": {
     "title": "Entorno de pruebas",

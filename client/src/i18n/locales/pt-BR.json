@@ -370,6 +370,12 @@
     "unchecked": "não verificado"
   },
   "analytics": {
+    "searchScopeAll": "Todos",
+    "searchScopeAriaLabel": "Escopo do filtro",
+    "searchScopeCalls": "Chamadas",
+    "searchScopeErrors": "Erros",
+    "searchScopeKeys": "Chaves",
+    "searchScopeModels": "Modelos",
     "title": "Análises",
     "description": "Volume de solicitações, latência, consumo de tokens e falhas.",
     "range24h": "24 h",
@@ -439,7 +445,11 @@
     "keyOrdinal": "chave #{n}",
     "attemptTimingHint": "Deslocamento desde o início da requisição · duração da tentativa",
     "requestedModel": "Modelo solicitado",
-    "ttft": "TTFT"
+    "ttft": "TTFT",
+    "searchAriaLabel": "Filtrar tabelas de análises",
+    "noMatches": "Nenhuma linha corresponde ao filtro.",
+    "matchedCount": "{shown} de {total} correspondem",
+    "filterActiveHint": "Filtrando por \"{query}\""
   },
   "playground": {
     "title": "Playground",

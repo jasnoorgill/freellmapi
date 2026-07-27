@@ -370,6 +370,12 @@
     "unchecked": "unchecked"
   },
   "analytics": {
+    "searchScopeAll": "All",
+    "searchScopeAriaLabel": "Filter scope",
+    "searchScopeCalls": "Calls",
+    "searchScopeErrors": "Errors",
+    "searchScopeKeys": "Keys",
+    "searchScopeModels": "Models",
     "title": "Analytics",
     "description": "Request volume, latency, token usage, and failures.",
     "range24h": "24h",
@@ -439,7 +445,11 @@
     "keyOrdinal": "key #{n}",
     "attemptTimingHint": "Start offset from request start · attempt duration",
     "requestedModel": "Requested model",
-    "ttft": "TTFT"
+    "ttft": "TTFT",
+    "searchAriaLabel": "Filter analytics tables",
+    "noMatches": "No rows match the filter.",
+    "matchedCount": "{shown} of {total} matching",
+    "filterActiveHint": "Filtering by \"{query}\""
   },
   "playground": {
     "title": "Playground",

@@ -1,20 +1,19 @@
-import { useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import { ArrowDown, ArrowUp, ChevronsUpDown, Search, X } from 'lucide-react'
 import { useQuery } from '@tanstack/react-query'
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   LineChart, Line, Legend,
 } from 'recharts'
-import { X } from 'lucide-react'
 import { apiFetch } from '@/lib/api'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Badge } from '@/components/ui/badge'
 import { Dialog, DialogClose, DialogPopup, DialogTitle } from '@/components/ui/dialog'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { PageHeader } from '@/components/page-header'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip as HoverTooltip } from '@/components/tooltip'
-import { formatSqliteUtcToLocalTime } from '@/lib/utils'
+import { cn, formatSqliteUtcToLocalTime } from '@/lib/utils'
 import { platformColors } from '@/lib/routing'
 import { useI18n } from '@/i18n'
 
@@ -151,11 +150,172 @@ function shortUserAgent(ua: string | null): string {
   return first.length > 32 ? first.slice(0, 32) + '…' : first
 }
 
+const TIME_RANGES: readonly TimeRange[] = ['24h', '7d', '30d', '90d']
+const STORAGE_KEY = 'freellmapi.analytics.range'
+const DEFAULT_RANGE: TimeRange = '7d'
+
+// Read the previously-selected range from localStorage. Invalid or missing
+// values fall back to the 7d default so a corrupted entry never bricks the
+// page; SSR-safety follows the same try/catch shape as `lib/api.ts`.
+function loadStoredRange(): TimeRange {
+  if (typeof window === 'undefined') return DEFAULT_RANGE
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY)
+    if (stored && (TIME_RANGES as readonly string[]).includes(stored)) {
+      return stored as TimeRange
+    }
+  } catch {
+    /* localStorage unavailable (private mode, etc.) — use default */
+  }
+  return DEFAULT_RANGE
+}
+
+// Per-model table sort state. The `pinned` column is intentionally NOT
+// sortable — it renders "—" for zero-pinned rows and the unsortable `0`/`>0`
+// distinction would confuse the indicator. 3-state cycle per column:
+// null → asc → desc → null. Switching to a new column resets to asc.
+type SortColumn = 'model' | 'provider' | 'requests' | 'success' | 'latency' | 'inTokens' | 'outTokens' | 'saved'
+
+const SORT_COLUMNS: readonly SortColumn[] = [
+  'model', 'provider', 'requests', 'success', 'latency', 'inTokens', 'outTokens', 'saved',
+]
+const SORT_STORAGE_KEY = 'freellmapi.analytics.byModelSort'
+
+function sortValue(row: any, col: SortColumn): number | string | null {
+  switch (col) {
+    case 'model': return row.displayName ?? null
+    case 'provider': return row.platform ?? null
+    case 'requests': return row.requests ?? null
+    case 'success': return row.successRate ?? null
+    case 'latency': return row.avgLatencyMs ?? null
+    case 'inTokens': return row.totalInputTokens ?? null
+    case 'outTokens': return row.totalOutputTokens ?? null
+    case 'saved': return row.estimatedCost ?? null
+  }
+}
+
+function compareRows(a: any, b: any, col: SortColumn): number {
+  const av = sortValue(a, col)
+  const bv = sortValue(b, col)
+  if (av === null && bv === null) return 0
+  if (av === null) return 1
+  if (bv === null) return -1
+  if (typeof av === 'number' && typeof bv === 'number') return av - bv
+  return String(av).localeCompare(String(bv))
+}
+
+// Generic sort state for the recent-calls and usage-by-key tables on this
+// page. The per-model table added sortable headers first in PR #490 with a
+// non-generic shape; this generic helper lives next to it so the next table
+// that wants sort can reuse `<SortableHeader<C>` and `compareBy<R, C>`
+// without re-typing the comparator / storage boilerplate.
+//
+// 3-state cycle per column: null → asc → desc → null. Switching to a new
+// column resets to asc.
+type SortDirection = 'asc' | 'desc'
+type SortState<C extends string> = { column: C; direction: SortDirection } | null
+
+// Numeric/string accessor for a sortable column. Returns null for values
+// the API didn't include so they sort to the bottom on asc and top on desc.
+type SortValueFn<R, C extends string> = (row: R, col: C) => number | string | null
+
+function compareBy<R, C extends string>(
+  a: R, b: R, col: C, valueOf: SortValueFn<R, C>
+): number {
+  const av = valueOf(a, col)
+  const bv = valueOf(b, col)
+  // Nulls always last regardless of direction (Excel/Sheets convention).
+  if (av === null && bv === null) return 0
+  if (av === null) return 1
+  if (bv === null) return -1
+  if (typeof av === 'number' && typeof bv === 'number') return av - bv
+  return String(av).localeCompare(String(bv))
+}
+
+function loadStoredSort<C extends string>(
+  storageKey: string, validColumns: readonly C[]
+): SortState<C> {
+  if (typeof window === 'undefined') return null
+  try {
+    const raw = window.localStorage.getItem(storageKey)
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as { column?: unknown; direction?: unknown }
+    if (
+      typeof parsed.column === 'string' &&
+      (validColumns as readonly string[]).includes(parsed.column) &&
+      (parsed.direction === 'asc' || parsed.direction === 'desc')
+    ) {
+      return { column: parsed.column as C, direction: parsed.direction }
+    }
+  } catch {
+    /* corrupted JSON or storage unavailable — fall through to null */
+  }
+  return null
+}
+
+function persistSort<C extends string>(storageKey: string, sort: SortState<C>) {
+  if (typeof window === 'undefined') return
+  try {
+    if (sort === null) window.localStorage.removeItem(storageKey)
+    else window.localStorage.setItem(storageKey, JSON.stringify(sort))
+  } catch {
+    /* ignore — storage quota / private mode */
+  }
+}
 function formatTokens(n?: number): string {
   if (!n) return '0'
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`
   return String(n)
+}
+
+// Generic sortable header cell. Renders the label + a state-aware
+// indicator: unsorted → ChevronsUpDown (faded), asc → ArrowUp, desc →
+// ArrowDown. Right-aligned columns flip the indicator order so it sits
+// to the LEFT of the label, keeping the label closest to the data.
+function SortableHeader<C extends string>({
+  column,
+  label,
+  align,
+  extraClass,
+  sort,
+  onClick,
+}: {
+  column: C
+  label: string
+  align: 'left' | 'right'
+  extraClass?: string
+  sort: SortState<C>
+  onClick: (col: C) => void
+}) {
+  const active = sort?.column === column
+  const direction = active ? sort.direction : null
+  const indicator = direction === 'asc'
+    ? <ArrowUp className="size-3 shrink-0" />
+    : direction === 'desc'
+    ? <ArrowDown className="size-3 shrink-0" />
+    : <ChevronsUpDown className="size-3 shrink-0 opacity-40" />
+  const alignClass = align === 'right' ? 'text-right' : ''
+  const headClass = [alignClass, extraClass].filter(Boolean).join(' ')
+  return (
+    <TableHead className={headClass || undefined}>
+      <button
+        type="button"
+        onClick={() => onClick(column)}
+        aria-label={label}
+        aria-sort={direction === 'asc' ? 'ascending' : direction === 'desc' ? 'descending' : 'none'}
+        className={
+          'inline-flex items-center gap-1 ' +
+          (align === 'right' ? 'flex-row-reverse' : 'flex-row') +
+          ' cursor-pointer select-none hover:text-foreground transition-colors ' +
+          (active ? 'text-foreground' : 'text-muted-foreground')
+        }
+      >
+        <span>{label}</span>
+        {indicator}
+      </button>
+    </TableHead>
+  )
 }
 
 function Stat({ label, value, hint, className }: { label: string; value: string | number; hint?: string; className?: string }) {
@@ -170,12 +330,52 @@ function Stat({ label, value, hint, className }: { label: string; value: string 
   return hint ? <HoverTooltip text={hint} side="bottom" className="block">{card}</HoverTooltip> : card
 }
 
-function Panel({ title, actions, children }: { title: string; actions?: React.ReactNode; children: React.ReactNode }) {
+// One filter matches if the query (trimmed, lower-cased) appears anywhere in the
+// joined, lower-cased haystack. Empty query short-circuits to "match all" so
+// the underlying array stays untouched. Case-insensitive substring (not fuzzy,
+// not regex) — same shape FallbackPage uses (#343), so power users get one
+// mental model across the dashboard.
+type MatchesFn<T> = (row: T, q: string) => boolean
+function makeMatches<T>(getHaystack: (row: T) => string): MatchesFn<T> {
+  return (row, q) => {
+    if (!q) return true
+    return getHaystack(row).toLowerCase().includes(q)
+  }
+}
+
+// Panel card. The same `highlighted` ring used on the toolbar (#fe1) wraps
+// the card when its data is being filtered by the search box — same
+// primary-tinted ring, same shadow, same transition duration so the input
+// row and the table pulse in sync. `countLabel` is the pre-rendered top-right
+// text (parent calls `t('analytics.matchedCount', …)` so this component stays
+// presentational and doesn't need the i18n hook in scope). Same
+// flex/justify-between keeps the title left + count right even when no
+// count is rendered, so the title doesn't shift when a filter is applied.
+function Panel({
+  title,
+  children,
+  highlighted = false,
+  countLabel,
+}: {
+  title: string
+  children: React.ReactNode
+  highlighted?: boolean
+  countLabel?: React.ReactNode
+}) {
   return (
-    <div className="rounded-3xl border bg-card">
-      <div className="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-2">
+    <div
+      className={cn(
+        "rounded-3xl border bg-card transition-shadow duration-200",
+        highlighted && "ring-4 ring-primary shadow-xl shadow-primary/30"
+      )}
+    >
+      <div className="px-4 py-3 border-b flex items-center justify-between">
         <h3 className="text-sm font-medium">{title}</h3>
-        {actions}
+        {highlighted && countLabel != null && (
+          <span className="text-xs tabular-nums text-muted-foreground">
+            {countLabel}
+          </span>
+        )}
       </div>
       <div className="p-4">{children}</div>
     </div>
@@ -345,12 +545,65 @@ const chartVars = `
 .dark .analytics-viz { --series-a: #3987e5; --series-b: #199e70; }
 `
 
+
 export default function AnalyticsPage() {
   const { t } = useI18n()
-  const [range, setRange] = useState<TimeRange>('7d')
+  const [range, setRange] = useState<TimeRange>(loadStoredRange)
   // Capture "now" once at mount so the savings extrapolation below stays a pure
   // render (calling Date.now() during render is impure and non-deterministic).
   const [now] = useState(() => Date.now())
+  // Page-wide filter. Filtered client-side over already-fetched rows so
+  // keystrokes don't re-hit the API (the useQuery keys stay range-only).
+  // NOT persisted: the search box resets to empty on every page mount, same
+  // shape as FallbackPage and ProviderList. The user is more often
+  // investigating a one-off pattern than narrowing repeatedly across visits,
+  // and persistence makes the page land in a half-filtered state from a
+  // deep link with no context.
+  //
+  // The `scope` chip selects which tables the search applies to. Default
+  // 'all' preserves the prior behavior; the other values narrow the
+  // filter to a single table so typing in the box doesn't shrink panels
+  // the user isn't looking at. Tables outside the active scope render
+  // unfiltered.
+  //
+  // The query is trimmed + lowered once at the top of the filter
+  // pipeline — passing it through unchanged means each `matches` impl
+  // stays pure, but the trim+lower happens in every render where the
+  // user typed. Cheap (4 memoized filters, total dataset < few hundred
+  // rows).
+  type SearchScope = 'all' | 'models' | 'calls' | 'errors' | 'keys'
+  const [search, setSearch] = useState<string>('')
+  const [scope, setScope] = useState<SearchScope>('all')
+  const trimmedQuery = search.trim().toLowerCase()
+  const hasQuery = trimmedQuery.length > 0
+
+  // Remember the last-selected range across page reloads / new sessions so
+  // the user lands back on the window they were inspecting. Same
+  // localStorage shape as `theme` and `freellmapi.locale`.
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    try {
+      window.localStorage.setItem(STORAGE_KEY, range)
+    } catch {
+      /* ignore — storage quota / private mode */
+    }
+  }, [range])
+
+  // Per-model table sort. Cycle: null → asc → desc → null. Switching column
+  // starts at asc on the new column. Persisted so the next visit lands on
+  // the user's preferred sort.
+  const [sort, setSort] = useState<SortState<SortColumn>>(() => loadStoredSort<SortColumn>(SORT_STORAGE_KEY, SORT_COLUMNS))
+  useEffect(() => {
+    persistSort(SORT_STORAGE_KEY, sort)
+  }, [sort])
+
+  const onHeaderClick = (col: SortColumn) => {
+    setSort((current: SortState<SortColumn>) => {
+      if (!current || current.column !== col) return { column: col, direction: 'asc' }
+      if (current.direction === 'asc') return { column: col, direction: 'desc' }
+      return null // third click on the same column → restore API order
+    })
+  }
 
   const { data: summary, isLoading: summaryLoading } = useQuery({
     queryKey: ['analytics', 'summary', range],
@@ -377,6 +630,21 @@ export default function AnalyticsPage() {
     queryFn: () => apiFetch<ByKeyRow[]>(`/api/analytics/by-key?range=${range}`),
   })
 
+  // Apply the user's sort to byModel. When sort is null we render the rows
+  // in API-returned order; the API's natural ordering (requests DESC) is
+  // the right default. The sort is stable within the comparator because we
+  // fall back to insertion order for equal values (Array.prototype.sort is
+  // stable in all modern engines).
+  const sortedByModel = useMemo(() => {
+    if (!sort) return byModel
+    const copy = byModel.slice()
+    copy.sort((a, b) => {
+      const primary = compareRows(a, b, sort.column)
+      return sort.direction === 'asc' ? primary : -primary
+    })
+    return copy
+  }, [byModel, sort])
+
   const { data: errors = [] } = useQuery({
     queryKey: ['analytics', 'errors', range],
     queryFn: () => apiFetch<RecentErrorRow[]>(`/api/analytics/errors?range=${range}`),
@@ -390,8 +658,8 @@ export default function AnalyticsPage() {
   // Recent-calls list filters (status/platform) + the row opened in the
   // drill-down dialog. Filters ride the query key so react-query refetches
   // (and caches) each combination on its own.
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
-  const [platformFilter, setPlatformFilter] = useState<string>('all')
+  const [statusFilter] = useState<StatusFilter>('all')
+  const [platformFilter] = useState<string>('all')
   const [detailId, setDetailId] = useState<number | null>(null)
 
   const { data: recentCalls } = useQuery({
@@ -404,6 +672,73 @@ export default function AnalyticsPage() {
     },
   })
 
+  // ----- Page-wide filter ----------------------------------------------------
+  // One matches() builder per table, joined so the haystack is computed once
+  // per row in the filter pass (instead of three times via three separate
+  // predicates). For rows whose every field is a string primitive this is just
+  // template-literal concatenation. The four tables each carry slightly
+  // different searchable fields, so the haystack text is bespoke per row
+  // type. Charts are deliberately NOT filtered — they aggregate over the
+  // selected window and filtering them would misrepresent totals; the
+  // summary stat cards and time-series charts already stay unfiltered.
+  const matchesByModel = useMemo(
+    () => makeMatches<ByModelRow>((r) => `${r.displayName} ${r.platform} ${r.modelId}`),
+    []
+  )
+  const matchesByKey = useMemo(
+    () => makeMatches<ByKeyRow>((r) => `${r.label ?? ''} ${r.platform ?? ''} #${r.keyId}`),
+    []
+  )
+  const matchesRecentCall = useMemo(
+    () => makeMatches<RecentCallRow>((r) =>
+      `${r.clientIp ?? ''} ${r.clientUserAgent ?? ''} ${r.modelId} ${r.platform} ` +
+      `${r.requestedModel ?? ''} ${r.status} ${r.error ?? ''} ${r.requestType}`
+    ),
+    []
+  )
+  const matchesRecentError = useMemo(
+    () => makeMatches<RecentErrorRow>((r) => `${r.platform} ${r.modelId} ${r.error}`),
+    []
+  )
+  // Filtered versions of every list-driven surface. Each uses .filter + the
+  // `matches` helper so an empty query returns the array unmodified (no copy
+  // when there is no filter — saves an allocation per render in the common
+  // case). useMemo deps include trimmedQuery so a keystroke recomputes only
+  // what's affected; the dependencies on the source arrays keep the filter
+  // in sync with re-fetches when range changes.
+  // Per-table filtered arrays. The filter only applies when:
+  //   1. there's a non-empty query, AND
+  //   2. the active scope includes the table.
+  // A table outside the active scope renders unfiltered even with text in the
+  // box — that's the whole point of the scope chip. Empty query short-circuits
+  // to the source array (no allocation in the common no-filter case). The
+  // `highlight*` flags drive the panel ring + match-count display: a panel
+  // highlights only when it's in scope AND the filter produced ≥1 match.
+  // Zero matches in a panel = no highlight, no count, full table (the panel
+  // is a no-op for this query and renders as if there were no filter).
+  const inScope = (kind: 'models' | 'calls' | 'errors' | 'keys') =>
+    scope === 'all' || scope === kind
+  const visibleByModel = useMemo(
+    () => hasQuery && inScope('models')
+      ? sortedByModel.filter((r) => matchesByModel(r, trimmedQuery))
+      : sortedByModel,
+    [sortedByModel, matchesByModel, trimmedQuery, hasQuery, scope]
+  )
+  const visibleErrors = useMemo(
+    () => hasQuery && inScope('errors')
+      ? errors.filter((r) => matchesRecentError(r, trimmedQuery))
+      : errors,
+    [errors, matchesRecentError, trimmedQuery, hasQuery, scope]
+  )
+  // Single source of truth for "is this panel's filter active right now?" —
+  // any of the four tables highlighting pulls the search-row container
+  // into the same highlighted state, so the input area and the filtered
+  // table read as one visual unit. The byKey + calls entries are declared
+  // further down (next to their sorted/visible derivations) because they
+  // depend on variables that aren't in scope yet.
+  const highlightByModel  = hasQuery && inScope('models')  && sortedByModel.length > 0 && visibleByModel.length > 0
+  const highlightErrors   = hasQuery && inScope('errors')  && errors.length > 0       && visibleErrors.length > 0
+
   // Savings card shows ONE stable monthly figure regardless of the selected
   // range: the last-30-days data projected to a full month from its actual
   // span (a young install with 2 days of data shows 15x its 2-day total).
@@ -415,6 +750,130 @@ export default function AnalyticsPage() {
     queryKey: ['analytics', 'summary', '30d'],
     queryFn: () => apiFetch<SummaryResponse>(`/api/analytics/summary?range=30d`),
   })
+
+  // Recent-calls table sort. Same 3-state cycle as the per-model table.
+  // The `status` column is mapped to 0/1 so "error < success" sorts stably
+  // regardless of how the upstream provider phrases failures.
+  type RecentCallCol = 'time' | 'ip' | 'agent' | 'model' | 'provider' | 'status' | 'inTokens' | 'outTokens' | 'latency'
+  const RECENT_CALL_COLS: readonly RecentCallCol[] = [
+    'time', 'ip', 'agent', 'model', 'provider', 'status', 'inTokens', 'outTokens', 'latency',
+  ]
+  const RECENT_CALL_KEY = 'freellmapi.analytics.recentCallsSort'
+  const [recentCallsSort, setRecentCallsSort] = useState<SortState<RecentCallCol>>(
+    () => loadStoredSort<RecentCallCol>(RECENT_CALL_KEY, RECENT_CALL_COLS)
+  )
+  useEffect(() => persistSort(RECENT_CALL_KEY, recentCallsSort), [recentCallsSort])
+  const recentCallsValueOf: SortValueFn<RecentCallRow, RecentCallCol> = (row, col) => {
+    switch (col) {
+      case 'time': return row.createdAt ?? null
+      case 'ip': return row.clientIp ?? null
+      case 'agent': return row.clientUserAgent ?? null
+      case 'model': return row.modelId ?? null
+      case 'provider': return row.platform ?? null
+      // Map to 0/1 so ascending order is "errors first" no matter how
+      // upstream phrases the failure ("error" vs "errors" vs "failed").
+      case 'status': return row.status === 'success' ? 1 : 0
+      case 'inTokens': return row.inputTokens ?? null
+      case 'outTokens': return row.outputTokens ?? null
+      case 'latency': return row.latencyMs ?? null
+    }
+  }
+  const onRecentCallsHeaderClick = (col: RecentCallCol) => {
+    setRecentCallsSort((current: SortState<RecentCallCol>) => {
+      if (!current || current.column !== col) return { column: col, direction: 'asc' }
+      if (current.direction === 'asc') return { column: col, direction: 'desc' }
+      return null // third click → restore API-returned order
+    })
+  }
+
+  // Usage-by-key table sort. Same shape. The `label` value-of falls back
+  // to `#<id>` for untagged keys so they don't all bunch at the empty-
+  // string tail under the comparator's nulls-always-last rule.
+  type ByKeyCol = 'label' | 'provider' | 'requests' | 'success' | 'latency' | 'inTokens' | 'outTokens'
+  const BY_KEY_COLS: readonly ByKeyCol[] = [
+    'label', 'provider', 'requests', 'success', 'latency', 'inTokens', 'outTokens',
+  ]
+  const BY_KEY_KEY = 'freellmapi.analytics.byKeySort'
+  const [byKeySort, setByKeySort] = useState<SortState<ByKeyCol>>(
+    () => loadStoredSort<ByKeyCol>(BY_KEY_KEY, BY_KEY_COLS)
+  )
+  useEffect(() => persistSort(BY_KEY_KEY, byKeySort), [byKeySort])
+  const byKeyValueOf: SortValueFn<ByKeyRow, ByKeyCol> = (row, col) => {
+    switch (col) {
+      case 'label': return row.label ?? (row.keyId != null ? `#${row.keyId}` : null)
+      case 'provider': return row.platform ?? null
+      case 'requests': return row.requests ?? null
+      case 'success': return row.successRate ?? null
+      case 'latency': return row.avgLatencyMs ?? null
+      case 'inTokens': return row.totalInputTokens ?? null
+      case 'outTokens': return row.totalOutputTokens ?? null
+    }
+  }
+  const onByKeyHeaderClick = (col: ByKeyCol) => {
+    setByKeySort((current: SortState<ByKeyCol>) => {
+      if (!current || current.column !== col) return { column: col, direction: 'asc' }
+      if (current.direction === 'asc') return { column: col, direction: 'desc' }
+      return null
+    })
+  }
+
+  // Apply the user's sort to recent-calls and usage-by-key. When sort is
+  // null we render the rows in API-returned order; the API's natural
+  // ordering (newest-first for recent-calls, requests DESC for by-key) is
+  // the right default. The sort is stable within the comparator because
+  // we fall back to insertion order for equal values (Array.prototype.sort
+  // is stable in all modern engines).
+  const sortedRecentCalls = useMemo(() => {
+    const rows = recentCalls?.rows
+    if (!rows) return rows
+    if (!recentCallsSort) return rows
+    const copy = rows.slice()
+    const { column, direction } = recentCallsSort
+    copy.sort((a, b) => {
+      const primary = compareBy(a, b, column, recentCallsValueOf)
+      return direction === 'asc' ? primary : -primary
+    })
+    return copy
+  }, [recentCalls?.rows, recentCallsSort])
+
+  const sortedByKey = useMemo(() => {
+    if (!byKeySort) return byKey
+    const copy = byKey.slice()
+    const { column, direction } = byKeySort
+    copy.sort((a, b) => {
+      const primary = compareBy(a, b, column, byKeyValueOf)
+      return direction === 'asc' ? primary : -primary
+    })
+    return copy
+  }, [byKey, byKeySort])
+
+  // Filtered versions of byKey and recentCalls. Sorted first, then search-
+  // filtered, so the search box preserves the user's sort column. Same scope
+  // gate as the other two: only filter when the active scope includes the
+  // table. recentCalls may be undefined while the query is in flight; the
+  // helper preserves that case so the panel renders the loading state.
+  const visibleByKey = useMemo(
+    () => hasQuery && inScope('keys')
+      ? sortedByKey.filter((r) => matchesByKey(r, trimmedQuery))
+      : sortedByKey,
+    [sortedByKey, matchesByKey, trimmedQuery, hasQuery, scope]
+  )
+  const visibleRecentCalls = useMemo(() => {
+    const rows = sortedRecentCalls
+    if (!rows) return rows
+    return hasQuery && inScope('calls')
+      ? rows.filter((r) => matchesRecentCall(r, trimmedQuery))
+      : rows
+  }, [sortedRecentCalls, matchesRecentCall, trimmedQuery, hasQuery, scope])
+
+  // The remaining highlight flags live here because `sortedByKey` and
+  // `sortedRecentCalls` are declared further down (next to their sort
+  // state). All four are now in scope; the toolbar pulls `anyPanelHighlighted`
+  // from this single derived value to drive the input-area ring.
+  const highlightByKey    = hasQuery && inScope('keys')    && sortedByKey.length > 0  && visibleByKey.length > 0
+  const highlightByCalls  = hasQuery && inScope('calls')   && (sortedRecentCalls?.length ?? 0) > 0 && (visibleRecentCalls?.length ?? 0) > 0
+  const anyPanelHighlighted = highlightByModel || highlightErrors || highlightByKey || highlightByCalls
+
   const actualSavings = summary?.estimatedCostSavings ?? 0
   const baseSavings = summary30?.estimatedCostSavings ?? 0
   const spanDays = (() => {
@@ -469,15 +928,85 @@ export default function AnalyticsPage() {
         title={t('analytics.title')}
         description={t('analytics.description')}
         actions={
-          <SegmentedControl
-            value={range}
-            onValueChange={setRange}
-            options={(['24h', '7d', '30d', '90d'] as TimeRange[]).map(r => ({
-              value: r,
-              label: t(r === '24h' ? 'analytics.range24h' : r === '7d' ? 'analytics.range7d' : r === '30d' ? 'analytics.range30d' : 'analytics.range90d'),
-            }))}
-            ariaLabel={t('analytics.title')}
-          />
+          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+            {/* Search row: input + scope chips, all sharing one rounded border.
+                Mirrors the FallbackPage toolbar shape (#343). When any panel
+                below is actively filtering (highlighted), the same
+                primary-tinted ring animates around this whole container so
+                the input area reads as part of the same visual unit. Same
+                shadow + transition as the table panels, so the eye groups
+                them as one. `w-56` covers ~25 chars of model/IP query. */}
+            <div
+              className={cn(
+                "flex items-center gap-2 rounded-xl border bg-card px-2.5 py-1 transition-shadow duration-200",
+                anyPanelHighlighted && "ring-4 ring-primary shadow-xl shadow-primary/30"
+              )}
+            >
+              <div className="relative flex-1 min-w-0 sm:w-56">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder={t('models.searchPlaceholder')}
+                  aria-label={t('analytics.searchAriaLabel')}
+                  className="w-full bg-transparent py-1 pl-8 pr-7 text-sm outline-none"
+                />
+                {search && (
+                  <button
+                    onClick={() => setSearch('')}
+                    aria-label={t('models.clearSearch')}
+                    className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+                  >
+                    <X className="size-4" />
+                  </button>
+                )}
+              </div>
+              {/* Scope chip strip. `role="group"` + `aria-label` so screen
+                  readers announce "Filter scope" and treat the chips as a
+                  single radiogroup. Each chip is a real <button> (not a
+                  div) so Tab + Space/Enter works. The selected chip uses
+                  the same primary tint as the panel ring, tying the
+                  "active filter" cue across the toolbar and the table. */}
+              <div
+                role="group"
+                aria-label={t('analytics.searchScopeAriaLabel')}
+                className="flex items-center gap-1 pl-2 border-l"
+              >
+                {(['all', 'models', 'calls', 'errors', 'keys'] as const).map(s => {
+                  const isActive = scope === s
+                  return (
+                    <button
+                      key={s}
+                      type="button"
+                      onClick={() => setScope(s)}
+                      aria-pressed={isActive}
+                      className={cn(
+                        "rounded-full px-2.5 py-0.5 text-xs font-medium border transition-colors",
+                        isActive
+                          ? "bg-primary text-primary-foreground border-primary"
+                          : "bg-background text-muted-foreground hover:text-foreground hover:bg-muted"
+                      )}
+                    >
+                      {t(s === 'all' ? 'analytics.searchScopeAll'
+                           : s === 'models' ? 'analytics.searchScopeModels'
+                           : s === 'calls' ? 'analytics.searchScopeCalls'
+                           : s === 'errors' ? 'analytics.searchScopeErrors'
+                           : 'analytics.searchScopeKeys')}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+            <SegmentedControl
+              value={range}
+              onValueChange={setRange}
+              options={(['24h', '7d', '30d', '90d'] as TimeRange[]).map(r => ({
+                value: r,
+                label: t(r === '24h' ? 'analytics.range24h' : r === '7d' ? 'analytics.range7d' : r === '30d' ? 'analytics.range30d' : 'analytics.range90d'),
+              }))}
+              ariaLabel={t('analytics.title')}
+            />
+          </div>
         }
       />
 
@@ -633,9 +1162,15 @@ export default function AnalyticsPage() {
             )}
           </Panel>
 
-          <Panel title={t('analytics.recentErrors')}>
+          <Panel
+            title={t('analytics.recentErrors')}
+            highlighted={highlightErrors}
+            countLabel={highlightErrors ? t('analytics.matchedCount', { shown: visibleErrors.length, total: errors.length }) : undefined}
+          >
             {errors.length === 0 ? (
               <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noErrors')}</p>
+            ) : visibleErrors.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
             ) : (
               <div className="max-h-[240px] overflow-y-auto -mx-4">
                 <Table>
@@ -647,10 +1182,12 @@ export default function AnalyticsPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {errors.slice(0, 20).map((e) => (
+                    {visibleErrors.slice(0, 20).map((e) => (
                       <TableRow key={e.id}>
                         <TableCell className="pl-4 text-xs">{e.platform}</TableCell>
-                        <TableCell className="text-xs max-w-[200px] truncate">{e.error}</TableCell>
+                        <TableCell className="text-xs max-w-[200px] truncate">
+                          <HoverTooltip text={e.error ?? ''} side="top">{e.error}</HoverTooltip>
+                        </TableCell>
                         <TableCell className="text-right text-xs text-muted-foreground tabular-nums pr-4">
                           {formatSqliteUtcToLocalTime(e.createdAt, { hour: '2-digit', minute: '2-digit' })}
                         </TableCell>
@@ -670,65 +1207,32 @@ export default function AnalyticsPage() {
           <div className="lg:col-span-2">
             <Panel
               title={t('analytics.recentCalls')}
-              actions={
-                <div className="flex flex-wrap items-center gap-2">
-                  <SegmentedControl
-                    value={statusFilter}
-                    onValueChange={setStatusFilter}
-                    options={[
-                      { value: 'all', label: t('analytics.filterAll') },
-                      { value: 'success', label: t('common.success') },
-                      { value: 'error', label: t('analytics.errors') },
-                    ]}
-                    ariaLabel={t('common.status')}
-                  />
-                  <Select value={platformFilter} onValueChange={(v) => setPlatformFilter(v ?? 'all')}>
-                    <SelectTrigger size="sm" aria-label={t('common.provider')}>
-                      <SelectValue>
-                        {(v: string) => (!v || v === 'all' ? t('analytics.allProviders') : v)}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="all">{t('analytics.allProviders')}</SelectItem>
-                      {byPlatform.map((p) => (
-                        <SelectItem key={p.platform} value={p.platform}>
-                          <span className="flex items-center gap-2">
-                            <PlatformDot platform={p.platform} />
-                            <span>{p.platform}</span>
-                          </span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              }
+              highlighted={highlightByCalls}
+              countLabel={highlightByCalls ? t('analytics.matchedCount', { shown: visibleRecentCalls?.length ?? 0, total: recentCalls?.rows?.length ?? 0 }) : undefined}
             >
               {!recentCalls?.rows?.length ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
+              ) : !visibleRecentCalls?.length ? (
+                <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
               ) : (
                 <div className="max-h-[420px] overflow-y-auto -mx-4">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="pl-4">{t('analytics.time')}</TableHead>
-                        <TableHead>{t('analytics.clientIp')}</TableHead>
-                        <TableHead>{t('analytics.clientAgent')}</TableHead>
-                        <TableHead>{t('common.model')}</TableHead>
-                        <TableHead>{t('common.provider')}</TableHead>
-                        <TableHead>{t('common.status')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.attempts')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.outTokens')}</TableHead>
-                        <TableHead className="text-right pr-4">{t('analytics.latency')}</TableHead>
+                        <SortableHeader<RecentCallCol> column="time" label={t('analytics.time')} align="left" extraClass="pl-4" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="ip" label={t('analytics.clientIp')} align="left" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="agent" label={t('analytics.clientAgent')} align="left" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="model" label={t('common.model')} align="left" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="provider" label={t('common.provider')} align="left" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="status" label={t('common.status')} align="left" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="inTokens" label={t('analytics.inTokens')} align="right" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="outTokens" label={t('analytics.outTokens')} align="right" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
+                        <SortableHeader<RecentCallCol> column="latency" label={t('analytics.latency')} align="right" extraClass="pr-4" sort={recentCallsSort} onClick={onRecentCallsHeaderClick} />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {recentCalls.rows.map((r) => (
-                        <TableRow
-                          key={r.id}
-                          onClick={() => setDetailId(r.id)}
-                          className="cursor-pointer"
-                        >
+                      {visibleRecentCalls.map((r) => (
+                        <TableRow key={r.id}>
                           <TableCell className="pl-4 text-xs text-muted-foreground tabular-nums whitespace-nowrap">
                             {formatSqliteUtcToLocalTime(r.createdAt, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                           </TableCell>
@@ -815,27 +1319,33 @@ export default function AnalyticsPage() {
           </div>
 
           <div className="lg:col-span-2">
-            <Panel title={t('analytics.perModelBreakdown')}>
+            <Panel
+              title={t('analytics.perModelBreakdown')}
+              highlighted={highlightByModel}
+              countLabel={highlightByModel ? t('analytics.matchedCount', { shown: visibleByModel.length, total: byModel.length }) : undefined}
+            >
               {byModel.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">{t('common.noData')}</p>
+              ) : visibleByModel.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
               ) : (
                 <div className="max-h-[360px] overflow-y-auto -mx-4">
                   <Table>
                     <TableHeader>
                       <TableRow>
-                        <TableHead className="pl-4">{t('common.model')}</TableHead>
-                        <TableHead>{t('common.provider')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.requests')}</TableHead>
+                        <SortableHeader<SortColumn> column="model" label={t('common.model')} align="left" extraClass="pl-4" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="provider" label={t('common.provider')} align="left" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="requests" label={t('analytics.requests')} align="right" sort={sort} onClick={onHeaderClick} />
                         <TableHead className="text-right">{t('analytics.pinned')}</TableHead>
-                        <TableHead className="text-right">{t('common.success')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.latency')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.outTokens')}</TableHead>
-                        <TableHead className="text-right pr-4">{t('analytics.saved')}</TableHead>
+                        <SortableHeader<SortColumn> column="success" label={t('common.success')} align="right" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="latency" label={t('analytics.latency')} align="right" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="inTokens" label={t('analytics.inTokens')} align="right" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="outTokens" label={t('analytics.outTokens')} align="right" sort={sort} onClick={onHeaderClick} />
+                        <SortableHeader<SortColumn> column="saved" label={t('analytics.saved')} align="right" extraClass="pr-4" sort={sort} onClick={onHeaderClick} />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
-                      {byModel.map((m, i) => (
+                      {visibleByModel.map((m, i) => (
                         <TableRow key={i}>
                           <TableCell className="pl-4 text-sm font-medium">{m.displayName}</TableCell>
                           <TableCell className="text-xs text-muted-foreground">{m.platform}</TableCell>
@@ -858,37 +1368,45 @@ export default function AnalyticsPage() {
           {/* Usage by key: only rendered when the endpoint returns rows. */}
           {byKey.length > 0 && (
             <div className="lg:col-span-2">
-              <Panel title={t('analytics.usageByKey')}>
-                <div className="max-h-[360px] overflow-y-auto -mx-4">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead className="pl-4">{t('analytics.keyColumn')}</TableHead>
-                        <TableHead>{t('common.provider')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.requests')}</TableHead>
-                        <TableHead className="text-right">{t('common.success')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.latency')}</TableHead>
-                        <TableHead className="text-right">{t('analytics.inTokens')}</TableHead>
-                        <TableHead className="text-right pr-4">{t('analytics.outTokens')}</TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {byKey.map((k) => (
-                        <TableRow key={k.keyId}>
-                          <TableCell className="pl-4 text-sm font-medium">
-                            {k.label || t('analytics.keyLabelFallback', { id: k.keyId })}
-                          </TableCell>
-                          <TableCell className="text-xs text-muted-foreground">{k.platform ?? '—'}</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.requests}</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.successRate}%</TableCell>
-                          <TableCell className="text-right tabular-nums">{k.avgLatencyMs} ms</TableCell>
-                          <TableCell className="text-right tabular-nums">{formatTokens(k.totalInputTokens)}</TableCell>
-                          <TableCell className="text-right tabular-nums pr-4">{formatTokens(k.totalOutputTokens)}</TableCell>
+              <Panel
+                title={t('analytics.usageByKey')}
+                highlighted={highlightByKey}
+                countLabel={highlightByKey ? t('analytics.matchedCount', { shown: visibleByKey.length, total: byKey.length }) : undefined}
+              >
+                {visibleByKey.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">{t('analytics.noMatches')}</p>
+                ) : (
+                  <div className="max-h-[360px] overflow-y-auto -mx-4">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <SortableHeader<ByKeyCol> column="label" label={t('analytics.keyColumn')} align="left" extraClass="pl-4" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="provider" label={t('common.provider')} align="left" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="requests" label={t('analytics.requests')} align="right" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="success" label={t('common.success')} align="right" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="latency" label={t('analytics.latency')} align="right" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="inTokens" label={t('analytics.inTokens')} align="right" sort={byKeySort} onClick={onByKeyHeaderClick} />
+                          <SortableHeader<ByKeyCol> column="outTokens" label={t('analytics.outTokens')} align="right" extraClass="pr-4" sort={byKeySort} onClick={onByKeyHeaderClick} />
                         </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
+                      </TableHeader>
+                      <TableBody>
+                        {visibleByKey.map((k) => (
+                          <TableRow key={k.keyId}>
+                            <TableCell className="pl-4 text-sm font-medium">
+                              {k.label || t('analytics.keyLabelFallback', { id: k.keyId })}
+                            </TableCell>
+                            <TableCell className="text-xs text-muted-foreground">{k.platform ?? '—'}</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.requests}</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.successRate}%</TableCell>
+                            <TableCell className="text-right tabular-nums">{k.avgLatencyMs} ms</TableCell>
+                            <TableCell className="text-right tabular-nums">{formatTokens(k.totalInputTokens)}</TableCell>
+                            <TableCell className="text-right tabular-nums pr-4">{formatTokens(k.totalOutputTokens)}</TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
               </Panel>
             </div>
           )}

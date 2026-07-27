@@ -370,6 +370,12 @@
     "unchecked": "未检查"
   },
   "analytics": {
+    "searchScopeAll": "全部",
+    "searchScopeAriaLabel": "筛选范围",
+    "searchScopeCalls": "调用",
+    "searchScopeErrors": "错误",
+    "searchScopeKeys": "密钥",
+    "searchScopeModels": "模型",
     "title": "分析",
     "description": "请求量、延迟、令牌用量与失败情况。",
     "range24h": "24 小时",
@@ -439,7 +445,11 @@
     "keyOrdinal": "密钥 #{n}",
     "attemptTimingHint": "自请求开始的偏移 · 尝试耗时",
     "requestedModel": "请求的模型",
-    "ttft": "TTFT"
+    "ttft": "TTFT",
+    "searchAriaLabel": "筛选分析表格",
+    "noMatches": "没有符合筛选条件的行。",
+    "matchedCount": "{shown}/{total} 条匹配",
+    "filterActiveHint": "正在按“{query}”筛选"
   },
   "playground": {
     "title": "试玩台",

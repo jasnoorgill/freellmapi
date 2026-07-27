@@ -370,6 +370,12 @@
     "unchecked": "non controllato"
   },
   "analytics": {
+    "searchScopeAll": "Tutto",
+    "searchScopeAriaLabel": "Ambito del filtro",
+    "searchScopeCalls": "Chiamate",
+    "searchScopeErrors": "Errori",
+    "searchScopeKeys": "Chiavi",
+    "searchScopeModels": "Modelli",
     "title": "Analisi",
     "description": "Volume richieste, latenza, utilizzo token ed errori.",
     "range24h": "24h",
@@ -439,7 +445,11 @@
     "keyOrdinal": "chiave #{n}",
     "attemptTimingHint": "Offset dall'inizio della richiesta · durata del tentativo",
     "requestedModel": "Modello richiesto",
-    "ttft": "TTFT"
+    "ttft": "TTFT",
+    "searchAriaLabel": "Filtra le tabelle delle analisi",
+    "noMatches": "Nessuna riga corrisponde al filtro.",
+    "matchedCount": "{shown} di {total} corrispondono",
+    "filterActiveHint": "Filtrando per \"{query}\""
   },
   "playground": {
     "title": "Playground",
