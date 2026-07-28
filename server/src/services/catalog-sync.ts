@@ -523,7 +523,12 @@ export function applyCatalog(db: Db, catalog: Catalog): NonNullable<SyncResult['
       }
     }
 
-    if (catalog.embeddings) {
+    // Embeddings are their own full snapshot. Older catalogs omit this field,
+    // AND catalogs may publish `embeddings: []` while still shipping model
+    // rows — both cases mean "retain the app's bundled embedding baseline
+    // untouched". The JS truthy check on a non-empty array object would
+    // misfire on `[]`, wiping the seeded rows; gate on length instead.
+    if (catalog.embeddings && catalog.embeddings.length > 0) {
       const embeddingCandidates = db
         .prepare(`
           SELECT id, platform, model_id
