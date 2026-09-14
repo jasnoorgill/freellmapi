@@ -20,6 +20,7 @@ import {
   resolveRequestedIdForDispatch,
 } from '../services/model-groups.js';
 import {
+  fallbackRoutingTokens,
   newFallbackState,
   recordUpstreamSuccess,
   runFallbackLoop,
@@ -240,7 +241,7 @@ export async function runInboundChat(
       // latches the provider-reported REQUESTED size onto state. Inflate the
       // routing estimate on the next attempt so low-tpm / small-window models
       // are skipped by the existing gates in router.ts instead of re-firing.
-      const routingTotal = Math.max(estimatedTotal, state.observedTotalTokens ?? 0);
+      const routingTotal = fallbackRoutingTokens(state, estimatedTotal, outputReserve);
       return routeRequest(
         routingTotal,
         state.skipKeys.size ? state.skipKeys : undefined,

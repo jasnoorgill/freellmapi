@@ -200,6 +200,16 @@ export interface FallbackState {
   // context-length rejections. Max wins (never decreases): a smaller later
   // reading is the same request, not a smaller one.
   observedTotalTokens?: number;
+  observedInputTokens?: number;
+}
+
+/** Total for the next dispatch. Input-only observations still need output space. */
+export function fallbackRoutingTokens(state: FallbackState, estimatedTotal: number, outputReserve: number): number {
+  return Math.max(
+    estimatedTotal,
+    state.observedTotalTokens ?? 0,
+    state.observedInputTokens == null ? 0 : state.observedInputTokens + Math.max(0, outputReserve),
+  );
 }
 
 export function newFallbackState(): FallbackState {
@@ -380,8 +390,8 @@ export function recordRetryableFailure(route: RouteResult, err: any, state: Fall
   if (isContextTooLargeError(err) || isProviderBadRequestError(err)) {
     const reported = parseProviderReportedSize(route.platform, err?.message);
     if (reported != null) {
-      const current = state.observedTotalTokens ?? 0;
-      if (reported > current) state.observedTotalTokens = reported;
+      const field = reported.kind === 'input' ? 'observedInputTokens' : 'observedTotalTokens';
+      state[field] = Math.max(state[field] ?? 0, reported.tokens);
     }
   }
   state.skipKeys.add(`${route.platform}:${route.modelId}:${route.keyId}`);

@@ -57,9 +57,17 @@ const PATTERNS: Record<string, RegExp> = {
   cloudflare: /(?:contains\s+at\s+least\s+([\d,]+)\s+input\s+tokens|tokens\s*\(([\d,]+)\s*\))/i,
 };
 
-export function parseProviderReportedSize(platform: string, message: string | null | undefined): number | null {
+export interface ProviderReportedSize {
+  tokens: number;
+  kind: 'input' | 'total';
+}
+
+export function parseProviderReportedSize(platform: string, message: string | null | undefined): ProviderReportedSize | null {
   if (typeof message !== 'string' || message === '') return null;
   const re = PATTERNS[platform];
   if (!re) return null;
-  return pullFirstInt(message, re);
+  const tokens = pullFirstInt(message, re);
+  if (tokens == null) return null;
+  const inputOnly = platform === 'cloudflare' && /contains\s+at\s+least\s+[\d,]+\s+input\s+tokens/i.test(message);
+  return { tokens, kind: inputOnly ? 'input' : 'total' };
 }

@@ -9,12 +9,12 @@ describe('parseProviderReportedSize', () => {
   describe('groq', () => {
     it('extracts Requested N from a TPM 413', () => {
       const msg = 'Groq API error 413: Request too large for model `openai/gpt-oss-120b` in organization `org_01kptjck7bejta1btzc11cccy2` service tier `on_demand` on tokens per minute (TPM): Limit 8000, Requested 36532, please reduce your message size and try again.';
-      expect(parseProviderReportedSize('groq', msg)).toBe(36532);
+      expect(parseProviderReportedSize('groq', msg)).toEqual({ tokens: 36532, kind: 'total' });
     });
 
     it('extracts Requested N from llama-3.1-8b-instant 413', () => {
       const msg = 'Groq API error 413: Request too large for model `llama-3.1-8b-instant` in organization `org_01kptjck7bejta1btzc11cccy2` service tier `on_demand` on tokens per minute (TPM): Limit 6000, Requested 36783, please reduce your message size and try again.';
-      expect(parseProviderReportedSize('groq', msg)).toBe(36783);
+      expect(parseProviderReportedSize('groq', msg)).toEqual({ tokens: 36783, kind: 'total' });
     });
 
     it('returns null for the bare "Request Entity Too Large" body', () => {
@@ -24,19 +24,19 @@ describe('parseProviderReportedSize', () => {
 
     it('handles thousand-separator commas', () => {
       const msg = 'Groq API error 413: ... Limit 8000, Requested 36,532, please reduce ...';
-      expect(parseProviderReportedSize('groq', msg)).toBe(36532);
+      expect(parseProviderReportedSize('groq', msg)).toEqual({ tokens: 36532, kind: 'total' });
     });
   });
 
   describe('openrouter', () => {
     it('extracts the total from "requested about N tokens (...)"', () => {
       const msg = "OpenRouter API error 400: This endpoint's maximum context length is 65536 tokens. However, you requested about 68982 tokens (4982 of text input, 64000 in the output). Please reduce the length of either one, or use the context-compression.";
-      expect(parseProviderReportedSize('openrouter', msg)).toBe(68982);
+      expect(parseProviderReportedSize('openrouter', msg)).toEqual({ tokens: 68982, kind: 'total' });
     });
 
     it('handles variation in thousand separators and whitespace', () => {
       const msg = 'OpenRouter API error 400: requested about 68,847 tokens (4847 of text input, 64000 in the output).';
-      expect(parseProviderReportedSize('openrouter', msg)).toBe(68847);
+      expect(parseProviderReportedSize('openrouter', msg)).toEqual({ tokens: 68847, kind: 'total' });
     });
 
     it('returns null on a non-size error', () => {
@@ -47,12 +47,12 @@ describe('parseProviderReportedSize', () => {
   describe('cloudflare', () => {
     it('prefers the input-only number from a 400 context-length body', () => {
       const msg = 'Cloudflare API error 400: AiError: AiError: {"error":{"message":"This model\'s maximum context length is 24000 tokens. However, you requested 256 output tokens and your prompt contains at least 23745 input tokens, for a total of at least 24001 tokens."}}';
-      expect(parseProviderReportedSize('cloudflare', msg)).toBe(23745);
+      expect(parseProviderReportedSize('cloudflare', msg)).toEqual({ tokens: 23745, kind: 'input' });
     });
 
     it('falls back to the combined total from a 413 "tokens (N) exceeded" body', () => {
       const msg = 'Cloudflare API error 413: AiError: Ai: The estimated number of input and maximum output tokens (24092) exceeded this model context window limit (24000). (1ffb6b51-7168-4e29-a4ab-378d87917a79)';
-      expect(parseProviderReportedSize('cloudflare', msg)).toBe(24092);
+      expect(parseProviderReportedSize('cloudflare', msg)).toEqual({ tokens: 24092, kind: 'total' });
     });
 
     it('returns null on a non-size error', () => {
